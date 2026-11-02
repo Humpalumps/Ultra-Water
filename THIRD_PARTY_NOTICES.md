@@ -2,7 +2,7 @@
 
 Ultra Water is MIT licensed (see [LICENSE](LICENSE)). A few small pieces of its code are adapted from the MIT-licensed projects below. Their copyright notices are kept here, as their licences require. The MIT licence text that applies to each of them is at the end of this file.
 
-Runtime dependencies (three.js, lil-gui) are installed from npm and carry their own licences in `node_modules`.
+Runtime dependencies (three.js, lil-gui) are installed from npm and carry their own licences in `node_modules`. `npm run build` writes their licence texts to `dist/licenses.md` and copies this file to `dist/`, so both ship with every build.
 
 ## three.js
 
@@ -14,7 +14,7 @@ Runtime dependencies (three.js, lil-gui) are installed from npm and carry their 
 ## Hash without Sine (Dave Hoskins)
 
 - Source: https://www.shadertoy.com/view/4djSRW
-- Used in: `src/engine/PostFX.js` (`hash33`) and `src/scene/sky.js` (`gradient`)
+- Used in: `src/engine/PostFX.js` (`hash33`), `src/scene/sky.js` (`gradient`), `src/scene/terrain.js` (`th`, `th3`), `src/water/OceanSurface.js` (`hash12`, shared with `src/water/Spray.js`) and `src/water/bakeTextures.js` (`hash22`)
 - Copyright (c) 2014 David Hoskins
 - MIT License
 
