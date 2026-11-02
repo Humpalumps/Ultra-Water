@@ -78,11 +78,16 @@ const ALBEDO = /* glsl */`
   // wet band above the waterline, plus where the swash has run (dries over seconds)
   vec3 sw = swash(vWPos.xz, hgt);
   float wet = max(1.0 - smoothstep(0.35, 1.3 + 0.5 * n1, hgt), sw.z);
-  albedo *= mix(1.0, 0.58, wet);
-  // the swash film itself: glassy from the first mm, and tinted like the shallows as it
-  // thickens towards the waterline, so the sheet grades into the sea with no edge
+  // water filling the pores darkens sand and deepens its colour (light bounces more
+  // times inside the grains before it escapes, so each tint compounds): roughly the
+  // albedo squared, not a flat grey multiply, which reads as cold concrete. Below the
+  // waterline the bed keeps a flatter darkening, or a metre of water turns it olive.
+  albedo *= mix(vec3(1.0), mix(0.8 * albedo + 0.06, vec3(0.6), smoothstep(0.0, -0.8, hgt)), wet);
+  // the swash film itself: wet-shiny from the first mm (rippled, so a soft sheen rather
+  // than a sky mirror) and only faintly tinted, since a few cm of water absorb almost
+  // nothing; the sea's colour comes from depth, not the film
   float film = smoothstep(0.0, 0.004, sw.x) * step(0.0, hgt);
-  albedo *= mix(vec3(1.0), vec3(0.62, 0.82, 0.86), smoothstep(0.0, 0.06, sw.x) * film);
+  albedo *= mix(vec3(1.0), vec3(0.9, 0.97, 0.97), smoothstep(0.0, 0.06, sw.x) * film);
   // bubbles: lace on the running-up edge, broken remnants carried down in the backwash
   if (sw.y > 0.0) {
     float lace = smoothstep(0.35, 0.65, tn(vWPos.xz * 3.1 + uTime * 0.15) * 0.6 + tn(vWPos.xz * 7.3) * 0.4);
@@ -167,7 +172,7 @@ const LIGHTS_BEGIN = THREE.ShaderChunk.lights_fragment_begin
   .replace('vDirectionalShadowCoord[ i ]', 'sunShadowCoord');
 
 const ROUGH = /* glsl */`
-  roughnessFactor = mix(mix(roughnessFactor, 0.32, wet * step(0.0, hgt)), 0.06, film);
+  roughnessFactor = mix(mix(roughnessFactor, 0.32, wet * step(0.0, hgt)), 0.2, film);
 `;
 
 // caustics focused by the actual waves (Caustics.js); mean 1, so they only redistribute

@@ -575,7 +575,9 @@ void main() {
     spec *= mix(1.0, m, uGlint * smoothstep(4.0, 30.0, dist));
   }
 
-  vec3 col = mix(body, refl, F) + spec;
+  // the thin wash is churned and aerated, so it mirrors only a dim, broken sky: a full
+  // sky reflection over sand a hand deep washes it out to grey-white
+  vec3 col = mix(body, refl, F * mix(0.45, 1.0, smoothstep(0.08, 0.8, vth))) + spec;
   // vanishing film at the waterline: no reflection / specular seam where the mesh cuts the sand
   // (a few cm wide and over the swash band, so the edge melts into the moving film on
   // the sand instead of drawing a glassy lip line along the static mesh waterline)
@@ -608,7 +610,7 @@ void main() {
     // lace over a thin, patchy veil on the fresh bore only (an even translucent sheet over
     // the whole inner surf zone reads as ice); in the thin wash it all breaks up into lace
     float sCover = smoothstep(1.0 - shoreFoam * 1.1, 1.45 - shoreFoam * 1.1, sPattern) * sqrt(shoreFoam);
-    sCover = max(sCover, 0.3 * smoothstep(0.45, 0.9, shoreFoam) * smoothstep(0.35, 0.7, sPattern));
+    sCover = max(sCover, 0.3 * smoothstep(0.45, 0.9, shoreFoam) * smoothstep(0.35, 0.7, sPattern) * smoothstep(0.1, 0.5, vth));
     sCover *= mix(0.55, 1.0, smoothstep(0.05, 0.4, vth));
     if (sCover >= cover) {
       pat = sPattern; fh = sh_; dens = shoreFoam;
