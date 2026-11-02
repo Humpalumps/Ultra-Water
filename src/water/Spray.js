@@ -13,7 +13,9 @@ uniform vec3 uSunColor;
 uniform samplerCube uSkyCube;
 uniform float uSkyMaxLod;
 uniform vec3 uSpray;        // amount, size, max distance
+uniform vec2 uResolution;
 out vec2 vUv;
+out float vCov;
 out float vAlpha;
 out vec3 vLight;
 out float vSeed;
@@ -22,6 +24,11 @@ out float vViewZ;
 // camera-facing quad of the given size at p; droplets: strong forward scattering of the
 // sun + sky ambient
 void billboard(vec3 p, float size) {
+  // at least a pixel and a half across: a smaller droplet only flickers on and off as it
+  // crosses pixel centres, so it's drawn larger and fainter instead
+  float px = size * projectionMatrix[1][1] * uResolution.y * 0.5 / max(-(viewMatrix * vec4(p, 1.0)).z, 1e-3);
+  vCov = min(px * px / 2.25, 1.0);
+  size *= max(1.5 / px, 1.0);
   vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
   vec3 up = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
   vec4 view = viewMatrix * vec4(p + (right * position.x + up * position.y) * size, 1.0);
@@ -47,7 +54,7 @@ void main() {
   vec2 toE = e - cameraPosition.xz;
   if (dot(toE, toE) > uSpray.z * uSpray.z) return;
 
-  Shore s = shoreWaves(e, shoreSample(e));
+  Shore s = shoreWaves(e, shoreSample(e), 0.0);
   float a = s.wave0.x, k = s.wave0.y, w = s.wave0.z;
   // only real breakers throw spray; the small spills over bars and in the lagoon would
   // dot every crest with blobs
@@ -145,7 +152,7 @@ void main() {
     reach = 0.6;
   } else {
     // in the surf: the crest slamming into it, harder where it breaks
-    Shore sw = shoreWaves(e, sh);
+    Shore sw = shoreWaves(e, sh, 0.0);
     float a = sw.wave0.x;
     age = (mod(sw.wave0.w + PI, 2.0 * PI) - PI) / sw.wave0.z - r2 * 0.25;
     strength = smoothstep(0.04, 0.3, a) * (0.6 + 0.4 * sw.breaking0);
@@ -179,6 +186,7 @@ in float vAlpha;
 in vec3 vLight;
 in float vSeed;
 in float vViewZ;
+in float vCov;
 out vec4 fragColor;
 
 void main() {
@@ -187,7 +195,7 @@ void main() {
   // a cloud of droplets, not a smooth gaussian: whole soft puffs read as cotton balls
   float n = texture(uFoamTex, vUv * 0.08 + vSeed * 17.0).r;
   float drops = smoothstep(0.35, 0.7, texture(uFoamTex, vUv * 0.3 + vSeed * 7.0).r);
-  float a = vAlpha * exp(-3.5 * r * r) * (0.5 + n) * drops * 1.6;
+  float a = vAlpha * vCov * exp(-3.5 * r * r) * (0.5 + n) * drops * 1.6;
   // soft against the opaque scene (the water surface itself is handled by the depth test)
   float d = texelFetch(uSceneDepth, ivec2(gl_FragCoord.xy), 0).r * 2.0 - 1.0;
   float sceneZ = 2.0 * uNearFar.x * uNearFar.y / (uNearFar.y + uNearFar.x - d * (uNearFar.y - uNearFar.x));

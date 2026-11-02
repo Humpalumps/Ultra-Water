@@ -132,7 +132,7 @@ vec2 rockSwash(vec2 xz, vec2 dir, float k) {
 }
 #endif
 vec3 swash(vec2 xz, float hgt) {
-  if (hgt < -0.3) return vec3(0.0);
+  if (hgt < -0.3 || hgt >= 1.74 * uShoreWave.x) return vec3(0.0);
   Swash S = swashAt(xz);
   vec2 rk = vec2(0.0);
 #ifdef SWASH_ROCKS
@@ -152,7 +152,9 @@ vec3 swash(vec2 xz, float hgt) {
   // bubbly front while it runs up (a band behind the tip); in the backwash only sparse
   // remnants, thinning as they drain, so the film dissolves into wet sand instead of
   // leaving a pale sheet over the whole run-up
-  float edge = s < 0.35 ? smoothstep(-0.005, 0.005, th) * (1.0 - smoothstep(0.0, 0.06, th))
+  // (the front stays a few pixels wide however far off, or it crawls as a 1-pixel line)
+  float aa = 0.005 + 5e-5 * distance(xz, cameraPosition.xz);
+  float edge = s < 0.35 ? smoothstep(-aa, aa, th) * (1.0 - smoothstep(0.0, 0.06 + aa, th))
                         : 0.3 * smoothstep(0.0, 0.03, th) * (1.0 - smoothstep(0.35, 0.6, s));
   // churned foam piled against a rock while the water is up, torn apart in the backwash
   edge = max(edge, rk.y * smoothstep(0.0, 0.02, th) * (1.0 - smoothstep(0.15, 0.55, s)));
@@ -212,7 +214,8 @@ vec3 cascadeDamp(float depth) {
 // leave lace behind in the surf zone (residual).
 // wave0 = (amplitude, k, omega, phase) and breaking (0..1) of the main train, for spray
 struct Shore { vec3 disp; vec2 slope; float foam; vec4 wave0; float breaking0; vec2 dir; float lip; float residual; };
-Shore shoreWaves(vec2 xz, vec4 sh) {
+// cell: sampling interval (m); trains only a few cells long fade out instead of aliasing
+Shore shoreWaves(vec2 xz, vec4 sh, float cell) {
   Shore o = Shore(vec3(0.0), vec2(0.0), 0.0, vec4(0.0), 0.0, vec2(0.0), 0.0, 0.0);
   float depth = -sh.x, sdf = sh.y;
   float gl = length(sh.zw);
@@ -243,7 +246,7 @@ Shore shoreWaves(vec2 xz, vec4 sh) {
     float c = 0.5 + 0.5 * cos(ph);
     float s = sin(ph);
     const float P = 1.6;           // narrower crests, flatter troughs
-    float cp = pow(c, P - 1.0);
+    float cp = pow(max(c, 0.0), P - 1.0);
     float rel = a / max(depth, 0.05);
     // sections of each crest break early or late (peeling), new layout every wave
     float cycle = floor((ph + PI) / (2.0 * PI));
@@ -257,13 +260,19 @@ Shore shoreWaves(vec2 xz, vec4 sh) {
     // ahead of the crest) and both trains' Gerstner pinch share one budget, so the
     // surface never folds over into a glassy fin
     pitch = min(pitch, 0.35 / (1.08 * k));
+    // the lean is a c^6 pulse ~0.1 wavelength wide: on cells coarser than that it only
+    // folds triangles (dropped as backfaces) into flickering slivers along the crest
+    pitch *= 1.0 - smoothstep(0.03, 0.1, k * cell / (2.0 * PI));
     pinch -= 1.08 * pitch * k;
     float qak = min(pinch, uShoreWave.w * a * k * 8.0);
     pinch -= qak;
     float c5 = c * c * c * c * c;
-    o.disp.y += a * (2.0 * cp * c - 0.78);
-    o.disp.xz += dir * ((qak / k) * s + pitch * c5 * c);
-    o.slope += dir * (a * k * P * cp * s / max(1.0 - qak * cos(ph) + 3.0 * pitch * k * c5 * s, 0.2));
+    // the camera-centred grid slides as the view moves: a crest only a cell or two long
+    // gets resampled differently every frame and the waterline warps and flashes
+    float bl = 1.0 - smoothstep(0.1, 0.3, k * cell / (2.0 * PI));
+    o.disp.y += bl * a * (2.0 * cp * c - 0.78);
+    o.disp.xz += bl * dir * ((qak / k) * s + pitch * c5 * c);
+    o.slope += bl * dir * (a * k * P * cp * s / max(1.0 - qak * cos(ph) + 3.0 * pitch * k * c5 * s, 0.2));
     // whitewater: on the crest and trailing behind it once the wave is near breaking. An
     // established bore (rel > 0.4) also drags a long spilling sheet over its back face,
     // which reaches past the pinched crest so the band isn't squeezed into a ribbon; the
@@ -294,7 +303,7 @@ vec3 waterDisplacement(vec2 xz, vec3 lod) {
   vec3 d = textureLod(uDisp0, xz / uLength.x, max(lod.x, 0.0)).xyz * damp.x
          + textureLod(uDisp1, xz / uLength.y, max(lod.y, 0.0)).xyz * damp.y
          + textureLod(uDisp2, xz / uLength.z, max(lod.z, 0.0)).xyz * damp.z;
-  d += shoreWaves(xz, sh).disp;
+  d += shoreWaves(xz, sh, exp2(lod.x - 1.0) * uLength.x / N_TEX).disp;
   // rings at their world position; cell size back from the finest lod
   d.y += impactWaves(xz + d.xz, 2.0 * N_TEX / (exp2(lod.z - 1.0) * uLength.z)).x;
   return d;
@@ -340,7 +349,11 @@ void main() {
   // water can't drain below the bed: a trough over a bar or a flat just under sea level
   // only thins the water. Without this the coarse far mesh dips under the sand in
   // triangles, which the terrain still shades as underwater (sea level 0, caustics).
-  vWorld.y = max(vWorld.y, min(shoreSample(vWorld.xz).x + 0.04, 0.0));
+  // (clearance grows with distance, as the depth buffer's precision falls off)
+  if (vWorld.y < 0.0) {
+    float dc = distance(vWorld.xz, cameraPosition.xz);
+    vWorld.y = max(vWorld.y, min(shoreSample(vWorld.xz).x + 0.04 + 2e-7 * dc * dc, 0.0));
+  }
   gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0);
 }`;
 
@@ -426,8 +439,8 @@ void main() {
   float slick = smoothstep(0.3, 0.7, vnoise(vXZ * 0.006 + uTime * 0.01));
   float sl2 = mix(0.75, 1.0, slick), sl3 = mix(0.4, 1.0, slick);
   s2.xy *= sl2; s2.zw *= sl2 * sl2; s3.xy *= sl3; s3.zw *= sl3 * sl3;
-  Shore shore = shoreWaves(vXZ, sh);
   vec2 fwXZ = fwidth(vXZ);
+  Shore shore = shoreWaves(vXZ, sh, max(fwXZ.x, fwXZ.y));
   vec3 imp = impactWaves(vWorld.xz, 2.0 / max(max(fwXZ.x, fwXZ.y), 1e-3));
   vec2 slope = s0.xy + s1.xy + s2.xy + s3.xy + shore.slope + imp.yz;
   vec2 variance = max(s0.zw - s0.xy * s0.xy, 0.0) + max(s1.zw - s1.xy * s1.xy, 0.0)
@@ -516,14 +529,17 @@ void main() {
   // rocks (and props) the bed height map doesn't know about: water much thinner than the
   // column over the bed (measured from the displaced surface). Swash churns a wider ring
   // round them, which breathes as the waves rise and fall against them
-  float obst = smoothstep(0.5, 1.5, depthBelow + vWorld.y - vth);
-  float act = clamp(shore.residual * 1.5 + shoreFoam + 0.6 * obst, 0.0, 1.0);
-  float contact = smoothstep(mix(uFoam.z, 1.0, obst), 0.0, vth) * smoothstep(6.0, 2.0, depthBelow) * mix(0.0, 0.5, act);
-  // broken into drifting patches so it never traces the waterline as a continuous rim
-  contact *= smoothstep(0.3, 0.6, vnoise(vXZ * 0.7 + shore.dir * uTime * 0.4) * 0.65 + vnoise(vXZ * 2.3) * 0.35);
-  // and gone before the mesh edge, which would otherwise wear it as a row of white beads
-  contact *= smoothstep(0.03, 0.2, vth);
-  foam = max(foam, contact);
+  if (depthBelow < 6.0) {
+    float obst = smoothstep(0.5, 1.5, depthBelow + vWorld.y - vth);
+    float act = clamp(shore.residual * 1.5 + shoreFoam + 0.6 * obst, 0.0, 1.0);
+    float contact = smoothstep(mix(uFoam.z, 1.0, obst), 0.0, vth) * smoothstep(6.0, 2.0, depthBelow) * mix(0.0, 0.5, act);
+    // broken into drifting patches so it never traces the waterline as a continuous rim
+    contact *= smoothstep(0.3, 0.6, vnoise(vXZ * 0.7 + shore.dir * uTime * 0.4) * 0.65 + vnoise(vXZ * 2.3) * 0.35);
+    // and gone before the mesh edge, which would otherwise wear it as a row of white beads;
+    // far off the patches are sub-pixel and only sparkle
+    contact *= smoothstep(0.03, 0.2, vth) * (1.0 - smoothstep(300.0, 600.0, dist));
+    foam = max(foam, contact);
+  }
   // the surf rock: each crest slams into it and leaves a churned skirt that fades until
   // the next one and trails off into the lee (the depth-buffer contact above only reaches
   // ~1 m out from a steep face). Phase of the main train, so it pulses with the sets.
@@ -615,9 +631,9 @@ void main() {
       float tt = uTime * 3.0 + hash12(cell + l * 17.17) * 64.0, it = floor(tt);
       float n0 = poisson(lam, clamp(hash12(cell * 1.31 + it * 3.7), 1e-4, 0.9999));
       float n1 = poisson(lam, clamp(hash12(cell * 1.31 + (it + 1.0) * 3.7), 1e-4, 0.9999));
-      m += (j == 0 ? 1.0 - (lf - l0) : lf - l0) * min(mix(n0, n1, smoothstep(0.0, 1.0, tt - it)) / max(lam, 1e-4), 300.0);
+      m += (j == 0 ? 1.0 - (lf - l0) : lf - l0) * min(mix(n0, n1, smoothstep(0.0, 1.0, tt - it)) / max(lam, 1e-4), 30.0);
     }
-    spec *= mix(1.0, m, uGlint * smoothstep(4.0, 30.0, dist));
+    spec *= mix(1.0, m, uGlint * smoothstep(4.0, 30.0, dist) * smoothstep(0.05, 0.3, vth));
   }
 
   // the thin wash is churned and aerated, so it mirrors only a dim, broken sky: a full
@@ -674,6 +690,9 @@ void main() {
     if (rCover >= cover) { pat = rp; fh = 0.5; fg = vec2(0.0); dens = shore.residual * 0.5; }
     cover = max(cover, rCover);
   }
+  // no foam on the vanishing film at the waterline, whose thickness flickers as the far
+  // mesh slides; the band widens with distance like the film fade above
+  cover *= smoothstep(0.0, 0.05 + dist * 3e-4, vth);
   if (cover > 0.0) {
     // billows bump the normal (whitewater is lumpy, thin lace lies flat) and shade
     // their creases; thin foam is a bubble film tinted by the water under it, dense foam
@@ -770,7 +789,8 @@ export class OceanSurface {
     const a = THREE.MathUtils.degToRad(s.params.swellDirection);
     u.uSwellDir.value.set(-Math.cos(a), -Math.sin(a));
     u.uGridScale.value = Math.max(1, Math.abs(camera.position.y) / 2);
-    const coarse = Math.abs(camera.position.y) > HIGH_CAMERA ? 1 : 0;
+    // hysteresis, so hovering at the threshold doesn't swap grids back and forth
+    const coarse = +(Math.abs(camera.position.y) > HIGH_CAMERA * (this.mesh.geometry === this.grids[1] ? 0.85 : 1.15));
     this.mesh.geometry = this.grids[coarse];
     u.uCellStep.value = (2 * Math.PI) / (ANGULAR >> coarse);
     u.uNearFar.value.set(camera.near, camera.far);

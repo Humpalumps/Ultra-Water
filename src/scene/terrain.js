@@ -73,7 +73,7 @@ const ALBEDO = /* glsl */`
   albedo = mix(albedo, vec3(0.80, 0.78, 0.72), smoothstep(0.7, 0.92, flat_) * smoothstep(1.0, 2.0, hgt) * smoothstep(0.55, 0.8, r2) * 0.55);
 #else
   float sandLine = 2.4 + 1.6 * n3 + 0.8 * n1;
-  vec3 albedo = hgt < 0.0 ? seabed : sand;
+  vec3 albedo = mix(seabed, sand, smoothstep(-0.05, 0.05, hgt));
   albedo = mix(albedo, grass, smoothstep(sandLine, sandLine + 1.5, hgt) * smoothstep(0.62, 0.8, flat_));
   albedo = mix(albedo, rock, smoothstep(0.78, 0.62, flat_) * smoothstep(-6.0, 1.0, hgt));
   albedo = mix(albedo, rock * 1.1, smoothstep(38.0, 52.0, hgt + n1 * 8.0));
@@ -89,13 +89,16 @@ const ALBEDO = /* glsl */`
   // the swash film itself: wet-shiny from the first mm (rippled, so a soft sheen rather
   // than a sky mirror) and only faintly tinted, since a few cm of water absorb almost
   // nothing; the sea's colour comes from depth, not the film
-  float film = smoothstep(0.0, 0.004, sw.x) * step(0.0, hgt);
+  float film = smoothstep(0.0, 0.004, sw.x) * smoothstep(-0.05, 0.05, hgt);
   albedo *= mix(vec3(1.0), vec3(0.9, 0.97, 0.97), smoothstep(0.0, 0.06, sw.x) * film);
   // bubbles: lace on the running-up edge, broken remnants carried down in the backwash.
   // The less foam is left, the higher the threshold, so it breaks into ever smaller
   // islands as it pops rather than fading as a uniform veil
+  float fwP = max(fwidth(vWPos.x), fwidth(vWPos.z));
   if (sw.y > 0.0) {
     float lace = smoothstep(0.75 - 0.4 * sw.y, 0.92 - 0.3 * sw.y, tn(vWPos.xz * 3.1 + uTime * 0.15) * 0.6 + tn(vWPos.xz * 7.3) * 0.4);
+    // the lace cells shrink below a pixel far off: their average there, not a shimmer
+    lace = mix(lace, 0.3, smoothstep(0.05, 0.3, fwP));
     // a few cm of bubbles over wet sand: pale and sand-tinted, never paper white
     albedo = mix(albedo, albedo * 0.4 + vec3(0.42, 0.41, 0.38), min(sw.y * 1.4, 1.0) * lace * 0.7);
   }
@@ -178,7 +181,7 @@ const LIGHTS_BEGIN = THREE.ShaderChunk.lights_fragment_begin
   .replace('vDirectionalShadowCoord[ i ]', 'sunShadowCoord');
 
 const ROUGH = /* glsl */`
-  roughnessFactor = mix(mix(roughnessFactor, 0.32, wet * step(0.0, hgt)), 0.2, film);
+  roughnessFactor = mix(mix(roughnessFactor, 0.32, wet * smoothstep(-0.05, 0.05, hgt)), 0.2, film);
 `;
 
 // caustics focused by the actual waves (Caustics.js); mean 1, so they only redistribute
