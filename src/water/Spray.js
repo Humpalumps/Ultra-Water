@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { WATER_GLSL } from './OceanSurface.js';
+import { WATER_GLSL, SWASH_GLSL } from './OceanSurface.js';
 
 // Breaker spray, fully stateless: each instance is an emitter in the surf zone. The
 // vertex shader evaluates the same shore-wave train the surface uses; when a breaking
@@ -69,7 +69,7 @@ void main() {
   float y = 1.1 * a + (vy + G / KD) * ex - G * age / KD;
   if (y < -0.3) return;
 
-  float size = (0.1 + 0.6 * age) * (0.6 + 0.8 * fract(r2 * 5.3)) * uSpray.y * sqrt(a / 0.5);
+  float size = (0.05 + 0.35 * age) * (0.6 + 0.8 * fract(r2 * 5.3)) * uSpray.y * sqrt(a / 0.5);
   billboard(vec3(xz.x, y, xz.y), size);
   vSeed = r1;
   vAlpha = strength * uSpray.x * smoothstep(0.0, 0.12, age) * pow(1.0 - age / life, 1.5)
@@ -106,6 +106,68 @@ void main() {
          * smoothstep(-0.2, 0.1, y) * smoothstep(1.0, 4.0, vViewZ);
 }`;
 
+// Rocks the waves run into: each instance sits on the seaward side of one rock. When a
+// shore wave crest (rocks standing in water) or the swash front (rocks on the beach)
+// reaches its foot, it is thrown up the face and back off it, ballistic with drag, so the
+// water visibly stops against the rock instead of sliding past it.
+const ROCK_SPLASH_PER_ROCK = 128;
+const ROCK_VERT = VERT_COMMON + SWASH_GLSL + /* glsl */`
+in vec4 aRock;              // centre xz, footprint radius, random
+
+void main() {
+  vAlpha = 0.0;
+  gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+  vec2 c = aRock.xy;
+  float rr = aRock.z;
+  vec2 toE = c - cameraPosition.xz;
+  if (dot(toE, toE) > uSpray.z * uSpray.z) return;
+  float r1 = aRock.w, r2 = fract(r1 * 57.31 + 0.13), r3 = fract(r1 * 23.17 + 0.71);
+  vec4 sh = shoreSample(c);
+  vec2 dir = shoreDir(sh, travelSample(c));
+  if (dot(dir, dir) < 0.5) return;
+  // a point on the seaward half of the footprint, outward normal n
+  float ang = (r1 - 0.5) * 2.6;
+  vec2 n = -vec2(dir.x * cos(ang) - dir.y * sin(ang), dir.x * sin(ang) + dir.y * cos(ang));
+  vec2 e = c + n * rr * 1.08;
+  float hb = shoreSample(e).x;
+  float age, strength, y0, reach;
+  if (hb > -0.3) {
+    // on the beach: the swash front reaching the foot of the rock, harder the further
+    // below its run-up height the foot is
+    Swash S = swashAt(e);
+    float Rf = S.R * 2.1;
+    float h = max(hb, 0.0);
+    if (Rf < 0.05 || h > Rf * 0.9) return;
+    float sArr = 0.3 * asin(h / Rf) / 1.5708;
+    age = (S.s - sArr) * 6.2831853 / S.w - r2 * 0.25;
+    strength = smoothstep(0.05, 0.3, S.R) * sqrt(1.0 - h / Rf);
+    y0 = h + 0.05;
+    reach = 0.6;
+  } else {
+    // in the surf: the crest slamming into it, harder where it breaks
+    Shore sw = shoreWaves(e, sh);
+    float a = sw.wave0.x;
+    age = (mod(sw.wave0.w + PI, 2.0 * PI) - PI) / sw.wave0.z - r2 * 0.25;
+    strength = smoothstep(0.04, 0.3, a) * (0.6 + 0.4 * sw.breaking0);
+    y0 = 1.2 * a;
+    reach = 1.5 + 4.0 * sqrt(a);
+  }
+  float life = 0.5 + 0.9 * r3;
+  if (strength <= 0.01 || age < 0.0 || age > life) return;
+  const float KD = 1.6, G = 9.81;
+  float ex = (1.0 - exp(-KD * age)) / KD;
+  // up the face, then falling back off it seawards and to the sides
+  float vy = (2.0 + 4.0 * r3 * r3) * reach * strength;
+  vec2 vh = n * (0.15 + 0.5 * r2) * reach + dir * 0.3;
+  vec2 xz = e + vh * ex;
+  float y = y0 + (vy + G / KD) * ex - G * age / KD;
+  if (y < y0 - 0.3) return;
+  billboard(vec3(xz.x, y, xz.y), (0.04 + 0.3 * age) * (0.5 + r2) * uSpray.y * mix(0.6, 1.0, reach / 3.0));
+  vSeed = r1;
+  vAlpha = uSpray.x * 2.0 * strength * smoothstep(0.0, 0.06, age) * pow(1.0 - age / life, 1.5)
+         * smoothstep(uSpray.z, uSpray.z * 0.7, sqrt(dot(toE, toE))) * smoothstep(1.0, 4.0, vViewZ);
+}`;
+
 const FRAG = /* glsl */`
 precision highp float;
 uniform sampler2D uSceneDepth;
@@ -122,9 +184,10 @@ out vec4 fragColor;
 void main() {
   float r = length(vUv);
   if (vAlpha <= 0.0 || r > 1.0) discard;
-  // soft gaussian puff, broken up only at low frequency so it reads as mist
+  // a cloud of droplets, not a smooth gaussian: whole soft puffs read as cotton balls
   float n = texture(uFoamTex, vUv * 0.08 + vSeed * 17.0).r;
-  float a = vAlpha * exp(-3.5 * r * r) * (0.5 + n);
+  float drops = smoothstep(0.35, 0.7, texture(uFoamTex, vUv * 0.3 + vSeed * 7.0).r);
+  float a = vAlpha * exp(-3.5 * r * r) * (0.5 + n) * drops * 1.6;
   // soft against the opaque scene (the water surface itself is handled by the depth test)
   float d = texelFetch(uSceneDepth, ivec2(gl_FragCoord.xy), 0).r * 2.0 - 1.0;
   float sceneZ = 2.0 * uNearFar.x * uNearFar.y / (uNearFar.y + uNearFar.x - d * (uNearFar.y - uNearFar.x));
@@ -155,7 +218,7 @@ function quads(count) {
 }
 
 export class Spray {
-  constructor(surface, shore, count = 150000) {
+  constructor(surface, shore, rocks = [], count = 150000) {
     const em = sampleEmitters(shore, count);
     const geo = quads(em.count);
     geo.setAttribute('aEmit', new THREE.InstancedBufferAttribute(em.data, 4));
@@ -172,11 +235,21 @@ export class Spray {
     this.mesh.frustumCulled = false;
     this.splash = new THREE.Mesh(quads(8 * SPLASH_PER_IMPACT), material(SPLASH_VERT));
     this.splash.frustumCulled = false;
+    const rockGeo = quads(rocks.length * ROCK_SPLASH_PER_ROCK);
+    const aRock = new Float32Array(rocks.length * ROCK_SPLASH_PER_ROCK * 4);
+    let seed = 5;
+    const rand = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
+    rocks.forEach((r, i) => {
+      for (let k = 0; k < ROCK_SPLASH_PER_ROCK; k++) aRock.set([r.x, r.z, r.r, rand()], (i * ROCK_SPLASH_PER_ROCK + k) * 4);
+    });
+    rockGeo.setAttribute('aRock', new THREE.InstancedBufferAttribute(aRock, 4));
+    this.rockSplash = new THREE.Mesh(rockGeo, material(ROCK_VERT));
+    this.rockSplash.frustumCulled = false;
   }
 
   update() {
     const p = this.params;
     this.uniforms.uSpray.value.set(p.amount, p.size, p.distance);
-    this.mesh.visible = this.splash.visible = p.amount > 0;
+    this.mesh.visible = this.splash.visible = this.rockSplash.visible = p.amount > 0;
   }
 }

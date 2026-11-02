@@ -96,34 +96,73 @@ vec2 shoreDir(vec4 sh, vec4 tr) { return dot(tr.yz, tr.yz) > 0.25 ? normalize(tr
 `;
 
 // Swash on the beach (terrain shader): every bore reaching the waterline runs up the sand
-// to a height R and drains back. Returns (film thickness m, edge foam 0..1, wetness 0..1).
+// to a height R and drains back. swashAt() is the timing alone (shared with the rock
+// splashes in Spray.js); swash() returns (film thickness m, edge foam 0..1, wetness 0..1).
+// With SWASH_ROCKS defined (uRockIdx/uRockData declared first) the shore rocks shelter a
+// dry wedge in their lee, make the run-up surge up their seaward faces and churn foam
+// against them.
 export const SWASH_GLSL = /* glsl */`
-vec3 swash(vec2 xz, float hgt) {
+// R: run-up height (m, 0 = none), s: fraction of a period since the bore reached the
+// waterline, w: angular frequency, dir: travel direction (xz)
+struct Swash { float R; float s; float w; vec2 dir; };
+Swash swashAt(vec2 xz) {
+  Swash o = Swash(0.0, 0.0, 1.0, vec2(0.0));
   vec4 sh = shoreSample(xz);
-  if (hgt < -0.3 || sh.y > 60.0 || uShoreWave.x <= 0.0) return vec3(0.0);
-  vec2 dir = shoreDir(sh, travelSample(xz));
+  if (sh.y > 60.0 || uShoreWave.x <= 0.0) return o;
+  o.dir = shoreDir(sh, travelSample(xz));
   // run-up of what's left of the breakers: lagoon and lee beaches only lap
-  float A = min(uShoreWave.x * shoreExposure(dir) * shoreGroup(xz), 0.42 * surfSample(xz) + 0.02);
-  float R = 0.55 * A * smoothstep(0.35, 0.8, length(sh.zw));
+  float A = min(uShoreWave.x * shoreExposure(o.dir) * shoreGroup(xz), 0.42 * surfSample(xz) + 0.02);
+  o.R = 0.55 * A * smoothstep(0.35, 0.8, length(sh.zw));
+  o.w = sqrt(9.81 * 6.2831853 / uShoreWave.y) * uShoreWave.z;
+  o.s = fract((o.w * uTime + shoreNoisePhase(xz)) / 6.2831853);
+  return o;
+}
+#ifdef SWASH_ROCKS
+// rock k's hold on the swash at xz: x = shelter in its lee, y = closeness to its seaward face
+vec2 rockSwash(vec2 xz, vec2 dir, float k) {
+  if (k < 0.0) return vec2(0.0);
+  vec4 rk = texelFetch(uRockData, ivec2(int(k), 0), 0);
+  vec2 d = xz - rk.xy;
+  float r = rk.z, l = length(d);
+  float along = dot(d, dir), across = abs(dir.x * d.y - dir.y * d.x);
+  // the fronts bend round both sides and close in again a few radii behind it
+  float lee = smoothstep(r, 0.45 * r, across + 0.28 * along) * smoothstep(-0.3 * r, 0.4 * r, along);
+  float face = smoothstep(-0.25, 0.55, -along / max(l, 1e-3)) * smoothstep(0.6 + 0.2 * r, 0.0, l - r);
+  return vec2(lee, face);
+}
+#endif
+vec3 swash(vec2 xz, float hgt) {
+  if (hgt < -0.3) return vec3(0.0);
+  Swash S = swashAt(xz);
+  vec2 rk = vec2(0.0);
+#ifdef SWASH_ROCKS
+  vec2 ids = textureLod(uRockIdx, xz / uShoreExtent + 0.5, 0.0).rg;
+  rk = max(rockSwash(xz, S.dir, ids.x), rockSwash(xz, S.dir, ids.y));
+#endif
+  float R = S.R * (1.0 - 0.9 * rk.x);
+  // the bore runs into the rock and its momentum carries it up the face (~u^2/2g),
+  // a surge that drains off again before the rest of the backwash
+  float up = 1.0 + 1.1 * rk.y;
   if (R < 0.02) return vec3(0.0);
-  if (hgt > R) return vec3(0.0, 0.0, 0.5 * smoothstep(1.5 * R, R, hgt));   // reached by bigger sets
-  float w = sqrt(9.81 * 6.2831853 / uShoreWave.y) * uShoreWave.z;
-  // fraction of a period since the last bore reached the waterline (tau = 0 there)
-  float s = fract((w * uTime + shoreNoisePhase(xz)) / 6.2831853);
+  if (hgt > R * up) return vec3(0.0, 0.0, 0.5 * smoothstep(1.5 * R * up, R * up, hgt));   // reached by bigger sets
+  float s = S.s;
   float eta = R * (s < 0.3 ? sin(s / 0.3 * 1.5708) : cos((s - 0.3) / 0.7 * 1.5708));
+  eta *= mix(up, 1.0, smoothstep(0.25, 0.45, s));
   float th = eta - hgt;
-  // bubbly front while it runs up (a band behind the tip), thin remnants in the backwash
+  // bubbly front while it runs up (a band behind the tip); in the backwash only sparse
+  // remnants, thinning as they drain, so the film dissolves into wet sand instead of
+  // leaving a pale sheet over the whole run-up
   float edge = s < 0.35 ? smoothstep(-0.005, 0.005, th) * (1.0 - smoothstep(0.0, 0.06, th))
-                        : 0.35 * smoothstep(0.0, 0.01, th) * (1.0 - smoothstep(0.35, 0.8, s));
+                        : 0.3 * smoothstep(0.0, 0.03, th) * (1.0 - smoothstep(0.35, 0.6, s));
+  // churned foam piled against a rock while the water is up, torn apart in the backwash
+  edge = max(edge, rk.y * smoothstep(0.0, 0.02, th) * (1.0 - smoothstep(0.15, 0.55, s)));
   // drying since the backwash uncovered this height
   float sPass = 0.3 + 0.7 * acos(clamp(hgt / R, 0.0, 1.0)) / 1.5708;
-  float dry = (s > sPass ? s - sPass : s + 1.0 - sPass) * 6.2831853 / w;
+  float dry = (s > sPass ? s - sPass : s + 1.0 - sPass) * 6.2831853 / S.w;
   return vec3(max(th, 0.0), edge, th > 0.0 ? 1.0 : exp(-dry / 5.0));
 }
 `;
 
-// Shared by the surface, the CPU height queries and the underwater pass, so every
-// consumer sees exactly the same surface.
 export const WATER_GLSL = /* glsl */`
 #define N_TEX ${N.toFixed(1)}
 #define PI 3.14159265359
@@ -298,6 +337,10 @@ void main() {
   vXZ = xz;
   vSurf = surfSample(xz);
   vWorld = vec3(xz.x + d.x, d.y, xz.y + d.z);
+  // water can't drain below the bed: a trough over a bar or a flat just under sea level
+  // only thins the water. Without this the coarse far mesh dips under the sand in
+  // triangles, which the terrain still shades as underwater (sea level 0, caustics).
+  vWorld.y = max(vWorld.y, min(shoreSample(vWorld.xz).x + 0.04, 0.0));
   gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0);
 }`;
 
@@ -478,6 +521,8 @@ void main() {
   float contact = smoothstep(mix(uFoam.z, 1.0, obst), 0.0, vth) * smoothstep(6.0, 2.0, depthBelow) * mix(0.0, 0.5, act);
   // broken into drifting patches so it never traces the waterline as a continuous rim
   contact *= smoothstep(0.3, 0.6, vnoise(vXZ * 0.7 + shore.dir * uTime * 0.4) * 0.65 + vnoise(vXZ * 2.3) * 0.35);
+  // and gone before the mesh edge, which would otherwise wear it as a row of white beads
+  contact *= smoothstep(0.03, 0.2, vth);
   foam = max(foam, contact);
   // the surf rock: each crest slams into it and leaves a churned skirt that fades until
   // the next one and trails off into the lee (the depth-buffer contact above only reaches

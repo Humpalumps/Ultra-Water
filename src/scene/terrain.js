@@ -26,6 +26,9 @@ uniform float uFogDensity;
 ${CAUSTICS_GLSL}
 ${FLOAT_SHADOW_GLSL}
 ${SHORE_GLSL}
+#define SWASH_ROCKS
+uniform sampler2D uRockIdx;
+uniform sampler2D uRockData;
 ${SWASH_GLSL}
 float th(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 float tn(vec2 p) { vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
@@ -88,10 +91,13 @@ const ALBEDO = /* glsl */`
   // nothing; the sea's colour comes from depth, not the film
   float film = smoothstep(0.0, 0.004, sw.x) * step(0.0, hgt);
   albedo *= mix(vec3(1.0), vec3(0.9, 0.97, 0.97), smoothstep(0.0, 0.06, sw.x) * film);
-  // bubbles: lace on the running-up edge, broken remnants carried down in the backwash
+  // bubbles: lace on the running-up edge, broken remnants carried down in the backwash.
+  // The less foam is left, the higher the threshold, so it breaks into ever smaller
+  // islands as it pops rather than fading as a uniform veil
   if (sw.y > 0.0) {
-    float lace = smoothstep(0.35, 0.65, tn(vWPos.xz * 3.1 + uTime * 0.15) * 0.6 + tn(vWPos.xz * 7.3) * 0.4);
-    albedo = mix(albedo, vec3(0.9, 0.92, 0.92), sw.y * lace);
+    float lace = smoothstep(0.75 - 0.4 * sw.y, 0.92 - 0.3 * sw.y, tn(vWPos.xz * 3.1 + uTime * 0.15) * 0.6 + tn(vWPos.xz * 7.3) * 0.4);
+    // a few cm of bubbles over wet sand: pale and sand-tinted, never paper white
+    albedo = mix(albedo, albedo * 0.4 + vec3(0.42, 0.41, 0.38), min(sw.y * 1.4, 1.0) * lace * 0.7);
   }
   diffuseColor.rgb = albedo;
 `;
@@ -288,6 +294,38 @@ function placeRocks(count, rand) {
   return out;
 }
 
+// Per shore-map texel the two rocks whose influence reaches it (index into uRockData,
+// -1 = none), ranked by distance in radii; uRockData holds centre xz and radius
+function rockMaps(rocks, extent, size = 512) {
+  const data = new Float32Array(rocks.length * 4);
+  rocks.forEach((r, i) => data.set([r.x, r.z, r.r, 0], i * 4));
+  const idx = new Float32Array(size * size * 2).fill(-1);
+  const texel = extent / size;
+  rocks.forEach((r, i) => {
+    const reach = 4.5 * r.r + 2 + texel;
+    const i0 = Math.max(0, Math.floor((r.x - reach) / texel + size / 2)), i1 = Math.min(size - 1, Math.ceil((r.x + reach) / texel + size / 2));
+    const j0 = Math.max(0, Math.floor((r.z - reach) / texel + size / 2)), j1 = Math.min(size - 1, Math.ceil((r.z + reach) / texel + size / 2));
+    for (let j = j0; j <= j1; j++) for (let ii = i0; ii <= i1; ii++) {
+      const x = (ii + 0.5 - size / 2) * texel, z = (j + 0.5 - size / 2) * texel;
+      const d = Math.hypot(x - r.x, z - r.z);
+      if (d > reach) continue;
+      const k = (j * size + ii) * 2, q = d / r.r;
+      const rank = (m) => (idx[k + m] < 0 ? Infinity : Math.hypot(x - rocks[idx[k + m]].x, z - rocks[idx[k + m]].z) / rocks[idx[k + m]].r);
+      if (q < rank(0)) { idx[k + 1] = idx[k]; idx[k] = i; } else if (q < rank(1)) idx[k + 1] = i;
+    }
+  });
+  const tex = (arr, w, h, fmt) => {
+    const t = new THREE.DataTexture(arr, w, h, fmt, THREE.FloatType);
+    t.minFilter = t.magFilter = THREE.NearestFilter;
+    t.needsUpdate = true;
+    return t;
+  };
+  return {
+    uRockIdx: { value: tex(idx, size, size, THREE.RGFormat) },
+    uRockData: { value: tex(data, Math.max(rocks.length, 1), 1, THREE.RGBAFormat) },
+  };
+}
+
 export function createTerrain({ sky, caustics, floatShadow, water, absorption, reflectionLayer = 1 }) {
   const uniforms = {
     ...floatShadow,
@@ -322,12 +360,17 @@ export function createTerrain({ sky, caustics, floatShadow, water, absorption, r
     else sc.set(s.s * (0.8 + rand() * 0.6), s.s * (0.5 + rand() * 0.5), s.s * (0.8 + rand() * 0.6));
     m.compose(new THREE.Vector3(s.x, s.y, s.z), qt.setFromEuler(e), sc);
     rocks.setMatrixAt(i, m);
+    // footprint where the (deformed unit sphere) rock meets the sand
+    s.r = 0.95 * (sc.x + sc.z) / 2;
   });
+  // rocks the waves and swash run into (the surf rock has its own treatment in the water)
+  const shoreRocks = spots.filter((s) => !s.hero && islandHeight(s.x, s.z) > -3 && islandHeight(s.x, s.z) < 2.5);
+  Object.assign(uniforms, rockMaps(shoreRocks, water.uShoreExtent.value));
   rocks.computeBoundingSphere();
   rocks.castShadow = rocks.receiveShadow = true;
 
   const group = new THREE.Group();
   group.add(ground, rocks);
   for (const o of [ground, rocks]) o.layers.enable(reflectionLayer);
-  return { group, uniforms, patchProp: (m) => patch(m, uniforms, 'prop') };
+  return { group, uniforms, shoreRocks, patchProp: (m) => patch(m, uniforms, 'prop') };
 }

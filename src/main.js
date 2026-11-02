@@ -105,9 +105,9 @@ out vec4 outColor;
 void main() { outColor = texture(uTex, vUv); }`, { uTex: { value: null } }));
 restore.mesh.renderOrder = -1;
 if (/OculusBrowser/.test(navigator.userAgent)) waterScene.add(restore.mesh);
-const spray = new Spray(surface, shore);
+const spray = new Spray(surface, shore, [...terrain.shoreRocks, { x: heroRock.x, z: heroRock.z, r: 8.5 }]);
 const snow = new MarineSnow(surface);
-waterScene.add(surface.mesh, spray.mesh, spray.splash, snow.mesh);
+waterScene.add(surface.mesh, spray.mesh, spray.splash, spray.rockSplash, snow.mesh);
 
 const post = new PostFX(renderer);
 post.params.bloomStrength = 0.05;
