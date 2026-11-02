@@ -268,17 +268,65 @@ function bakeTravel(height, sea, sdf, size, texel) {
   const kappa = boxBlur(boxBlur(curvature(dirX, dirZ, coh, size, texel), size, 2), size, 2);
   const fade = boxBlur(boxBlur(coh, size, 2), size, 2);
   const data = pack(tau, dirX, dirZ, rayTube(kappa, dirX, dirZ, sdf, size, texel), height, fade, size);
-  return { travel: floatTex(data, size), travelData: data };
+  return { travel: floatTex(data, size), travelData: data, surf: surfShelter(height, dirX, dirZ, sdf, size, texel) };
 }
 
-export function bakeShoreMap(heightFn, extent, size = 512) {
+// --- surf shelter: how much of a breaker survives to here --------------------------
+// A wave that broke over a bar or reef keeps only ~0.42 x the shallowest depth it
+// crossed. Marching seaward along the ray (-dir), S = the shallowest depth found past a
+// deeper stretch (a bar behind a trough, a reef crest behind a lagoon); the monotone
+// shoaling climb up to here doesn't count, the local depth already caps that. Land after
+// a trough means fully sheltered (S = 0). Open beaches keep S = SMAX. The initial dry
+// stretch is skipped so points up the beach get their swash shelter too.
+const SMAX = 6, HYST = 0.3, S_STEP = 1.5, S_DEEP = 12;
+function surfShelter(height, dirX, dirZ, sdf, size, texel) {
+  const S = new Float32Array(size * size).fill(SMAX), steps = Math.ceil(1500 / (S_STEP * texel));
+  for (let j = 0; j < size; j++) for (let i = 0; i < size; i++) {
+    const k = j * size + i;
+    if (sdf[k] > 400 || sdf[k] < -60) continue;
+    let x = i, y = j, wet = false, runMax = -Infinity, s = SMAX;
+    for (let n = 0; n < steps; n++) {
+      const ii = Math.min(size - 2, x | 0), jj = Math.min(size - 2, y | 0), m = jj * size + ii;
+      const fx = x - ii, fy = y - jj;
+      const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+      const d = -(height[m] * w00 + height[m + 1] * w10 + height[m + size] * w01 + height[m + size + 1] * w11);
+      if (d > 0) wet = true;
+      if (wet) {
+        if (d <= 0 && runMax > HYST) { s = 0; break; }
+        if (d > S_DEEP) break;
+        if (d < runMax - HYST && d < s) s = d;
+        if (d > runMax) runMax = d;
+      }
+      x -= S_STEP * (dirX[m] * w00 + dirX[m + 1] * w10 + dirX[m + size] * w01 + dirX[m + size + 1] * w11);
+      y -= S_STEP * (dirZ[m] * w00 + dirZ[m + 1] * w10 + dirZ[m + size] * w01 + dirZ[m + size + 1] * w11);
+      if (x < 0 || y < 0 || x > size - 1 || y > size - 1) break;
+    }
+    S[k] = Math.max(0, s);
+  }
+  // blur: energy diffracts into the lee a little, and the gate shouldn't show texels
+  const out = boxBlur(boxBlur(S, size, 2), size, 2);
+  const tex = new THREE.DataTexture(out, size, size, THREE.RedFormat, THREE.FloatType);
+  tex.minFilter = tex.magFilter = THREE.LinearFilter;
+  tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// obstacle(x, z): optional extra height (e.g. a rock) raised into the bathymetry the wave
+// fronts travel over, so they refract round it and its lee is sheltered. The stored bed
+// height and the coastline sdf ignore it: the water round the rock keeps its real depth
+// (full chop, no breaker sheet wrapped over a dome) and no wave gap opens to the beach
+export function bakeShoreMap(heightFn, extent, size = 512, obstacle = null) {
   const texel = extent / size;
-  const height = new Float32Array(size * size);
+  const bed = new Float32Array(size * size), height = new Float32Array(size * size);
   const land = new Uint8Array(size * size), sea = new Uint8Array(size * size);
   for (let j = 0; j < size; j++) for (let i = 0; i < size; i++) {
-    const h = heightFn(((i + 0.5) / size - 0.5) * extent, ((j + 0.5) / size - 0.5) * extent);
+    const x = ((i + 0.5) / size - 0.5) * extent, z = ((j + 0.5) / size - 0.5) * extent;
+    const h = heightFn(x, z);
     const k = j * size + i;
-    height[k] = h; land[k] = h > 0; sea[k] = h <= 0;
+    land[k] = h > 0; sea[k] = h <= 0;
+    bed[k] = h;
+    height[k] = obstacle ? Math.max(h, obstacle(x, z)) : h;
   }
   const toLand = edt2d(land, size), toSea = edt2d(sea, size);
   let sdf = new Float32Array(size * size);
@@ -292,7 +340,7 @@ export function bakeShoreMap(heightFn, extent, size = 512) {
   for (let j = 0; j < size; j++) for (let i = 0; i < size; i++) {
     const k = j * size + i;
     const s = (x, y) => sdf[Math.min(size - 1, Math.max(0, y)) * size + Math.min(size - 1, Math.max(0, x))];
-    data[k * 4] = height[k];
+    data[k * 4] = bed[k];
     data[k * 4 + 1] = sdf[k];
     data[k * 4 + 2] = (s(i + 1, j) - s(i - 1, j)) / (2 * texel);
     data[k * 4 + 3] = (s(i, j + 1) - s(i, j - 1)) / (2 * texel);

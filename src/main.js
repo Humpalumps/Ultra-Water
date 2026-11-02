@@ -6,7 +6,7 @@ import { OceanSurface } from './water/OceanSurface.js';
 import { bakeShoreMap } from './water/shoreMap.js';
 import { bakeWaterTextures } from './water/bakeTextures.js';
 import { SkySystem } from './scene/sky.js';
-import { createTerrain } from './scene/terrain.js';
+import { createTerrain, heroRock } from './scene/terrain.js';
 import { islandHeight } from './scene/islandHeight.js';
 import { PlanarReflection } from './engine/PlanarReflection.js';
 import { PostFX } from './engine/PostFX.js';
@@ -47,7 +47,12 @@ controls.maxDistance = 6000;
 
 // --- world ------------------------------------------------------------------------
 const sky = new SkySystem(renderer);
-const shore = bakeShoreMap(islandHeight, 1800, 512);
+// the surf rock as a dome in the bake: the fronts wrap round it, break on its face and
+// leave a sheltered lee
+const shore = bakeShoreMap(islandHeight, 1800, 512, (x, z) => {
+  const q = ((x - heroRock.x) ** 2 + (z - heroRock.z) ** 2) / (8.5 * 8.5);
+  return q < 1 ? 4 * (1 - q) : -Infinity;
+});
 const tex = bakeWaterTextures(renderer);
 const ocean = new OceanSim(renderer, defaultOceanParams());
 const caustics = new WaveCaustics(renderer, ocean);
@@ -63,6 +68,7 @@ const terrain = createTerrain({
   absorption: surface.uniforms.uAbsorption.value, reflectionLayer: REFLECT_LAYER,
 });
 scene.add(terrain.group);
+surface.uniforms.uRock.value.set(heroRock.x, heroRock.z, 8.5, 0);
 
 const sunLight = new THREE.DirectionalLight(0xffffff, Math.PI);
 sunLight.castShadow = true;
@@ -166,16 +172,27 @@ const views = {
     controls.target.set(c.x + Math.cos(b) * 400, 0, c.y + Math.sin(b) * 400);
   },
   'Breakers': () => {
-    setSun(22, 205);
+    setSun(38, 205);
+    // from 10 m over the clear outer shelf, looking down across the break line to the beach
     const b = sunBearing() + 1.9, c = coast(THREE.MathUtils.radToDeg(b));
-    camera.position.set(c.x + Math.cos(b) * 35 + Math.sin(b) * 40, 3.2, c.y + Math.sin(b) * 35 - Math.cos(b) * 40);
-    controls.target.set(c.x - Math.sin(b) * 30, 0, c.y + Math.cos(b) * 30);
+    const out = new THREE.Vector2(Math.cos(b), Math.sin(b)), side = new THREE.Vector2(-out.y, out.x);
+    camera.position.set(c.x + out.x * 48 - side.x * 35, 10, c.y + out.y * 48 - side.y * 35);
+    controls.target.set(c.x + out.x * 20 - side.x * 10, 0, c.y + out.y * 20 - side.y * 10);
   },
   'Lagoon': () => {
-    setSun(52, 205);
-    const b = sunBearing() + Math.PI, c = coast(THREE.MathUtils.radToDeg(b));
-    camera.position.set(c.x * 0.86, 28, c.y * 0.86);
-    controls.target.set(c.x * 1.25, 0, c.y * 1.25);
+    setSun(50, 205);
+    // the wide, flat shelf on the island's south-west: 1-2 m turquoise shallows, sand bars, soft swash
+    const b = sunBearing() - 1.48, c = coast(THREE.MathUtils.radToDeg(b));
+    const out = new THREE.Vector2(Math.cos(b), Math.sin(b)), side = new THREE.Vector2(-out.y, out.x);
+    camera.position.set(c.x - out.x * 2 + side.x * 25, 16, c.y - out.y * 2 + side.y * 25);
+    controls.target.set(c.x + out.x * 34 - side.x * 10, 0, c.y + out.y * 34 - side.y * 10);
+  },
+  'Surf rock': () => {
+    setSun(40, 205);
+    // the big rock in the surf, from a little above and up the beach side
+    const out = new THREE.Vector2(heroRock.x, heroRock.z).normalize(), side = new THREE.Vector2(-out.y, out.x);
+    camera.position.set(heroRock.x - out.x * 28 + side.x * 22, 14, heroRock.z - out.y * 28 + side.y * 22);
+    controls.target.set(heroRock.x, 0, heroRock.z);
   },
   'Open ocean': () => {
     setSun(14, 205);
@@ -189,11 +206,11 @@ const views = {
     controls.target.set(0, 0, 0);
   },
   'Flotsam': () => {
-    setSun(26, 205);
+    setSun(40, 205);
     const b = sunBearing() + 1.2, c = coast(THREE.MathUtils.radToDeg(b));
     const out = new THREE.Vector2(Math.cos(b), Math.sin(b)), side = new THREE.Vector2(-out.y, out.x);
-    camera.position.set(c.x + out.x * 75 + side.x * 10, 4.5, c.y + out.y * 75 + side.y * 10);
-    controls.target.set(c.x + out.x * 45 - side.x * 15, 0, c.y + out.y * 45 - side.y * 15);
+    camera.position.set(c.x + out.x * 75 + side.x * 10, 9, c.y + out.y * 75 + side.y * 10);
+    controls.target.set(c.x + out.x * 53.5 - side.x * 8, 0, c.y + out.y * 53.5 - side.y * 8);
     floaters.spawn(camera.position, controls.target.clone().sub(camera.position));
   },
   'Underwater': () => {
@@ -252,7 +269,7 @@ fShore.add(spray.params, 'size', 0.2, 3, 0.01).name('spray size');
 // in-scatter colour (deep water, underside, underwater fog), the tint of thin foam and
 // the underwater scattering (turbidity). 'clear' is the default look.
 const WATER_PRESETS = {
-  clear: { absorption: [0.42, 0.075, 0.048], scatter: [0.0, 0.05, 0.08], foam: [0.62, 0.78, 0.82], turbidity: 0.03 },
+  clear: { absorption: [0.40, 0.062, 0.032], scatter: [0.0, 0.05, 0.08], foam: [0.62, 0.78, 0.82], turbidity: 0.03 },
   tropical: { absorption: [0.36, 0.045, 0.06], scatter: [0.0, 0.085, 0.085], foam: [0.66, 0.86, 0.84], turbidity: 0.02 },
   'toxic green': { absorption: [0.45, 0.1, 1.1], scatter: [0.05, 0.1, 0.004], foam: [0.74, 0.84, 0.42], turbidity: 0.08 },
   purple: { absorption: [0.22, 0.85, 0.1], scatter: [0.05, 0.0, 0.09], foam: [0.8, 0.66, 0.88], turbidity: 0.04 },

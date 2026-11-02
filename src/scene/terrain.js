@@ -42,6 +42,13 @@ vec2 rippleSlope(vec2 p, vec2 d, float w, float s, float a, float amp) {
   return grad * amp * (cos(ph) + 0.5 * sin(2.0 * ph));
 }
 uniform mat4 uSunShadowMatrix;
+#ifdef ROCK
+// 3D value noise: the rock faces are steep, a 2D world-xz pattern would streak down them
+float th3(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+float tn3(vec3 p) { vec3 i = floor(p), f = fract(p); vec3 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(th3(i), th3(i + vec3(1, 0, 0)), u.x), mix(th3(i + vec3(0, 1, 0)), th3(i + vec3(1, 1, 0)), u.x), u.y),
+             mix(mix(th3(i + vec3(0, 0, 1)), th3(i + vec3(1, 0, 1)), u.x), mix(th3(i + vec3(0, 1, 1)), th3(i + 1.0), u.x), u.y), u.z); }
+#endif
 `;
 
 const ALBEDO = /* glsl */`
@@ -53,7 +60,14 @@ const ALBEDO = /* glsl */`
   vec3 grass = mix(vec3(0.20, 0.30, 0.10), vec3(0.33, 0.37, 0.15), n1) * (0.85 + 0.3 * n2);
   vec3 rock = mix(vec3(0.33, 0.31, 0.29), vec3(0.45, 0.41, 0.36), n2) * (0.8 + 0.4 * n3);
 #ifdef ROCK
-  vec3 albedo = rock * mix(0.9, 1.15, n1);
+  // banded stone (cavities come from the vertex colour), a dark weed-and-barnacle band
+  // through the tidal range and salt-bleached patches on the dry tops
+  float r1 = tn3(vWPos * 0.9), r2 = tn3(vWPos * 3.7 + 7.0);
+  float strata = sin(vWPos.y * 2.2 + r1 * 3.0) * 0.5 + 0.5;
+  vec3 albedo = mix(vec3(0.27, 0.25, 0.23), vec3(0.52, 0.47, 0.41), r1 * 0.6 + strata * 0.25 + r2 * 0.15);
+  float tide = (1.0 - smoothstep(0.4, 1.3 + 0.6 * r1, hgt)) * smoothstep(-3.0, -0.8, hgt);
+  albedo = mix(albedo, vec3(0.10, 0.11, 0.07) * (0.7 + 0.6 * r2), tide * 0.8);
+  albedo = mix(albedo, vec3(0.80, 0.78, 0.72), smoothstep(0.7, 0.92, flat_) * smoothstep(1.0, 2.0, hgt) * smoothstep(0.55, 0.8, r2) * 0.55);
 #else
   float sandLine = 2.4 + 1.6 * n3 + 0.8 * n1;
   vec3 albedo = hgt < 0.0 ? seabed : sand;
@@ -65,10 +79,15 @@ const ALBEDO = /* glsl */`
   vec3 sw = swash(vWPos.xz, hgt);
   float wet = max(1.0 - smoothstep(0.35, 1.3 + 0.5 * n1, hgt), sw.z);
   albedo *= mix(1.0, 0.58, wet);
-  // the swash film itself: a faint water tint and foam on its leading edge
-  float film = smoothstep(0.0, 0.015, sw.x) * step(0.0, hgt);
-  albedo *= mix(vec3(1.0), vec3(0.78, 0.88, 0.92), film);
-  albedo = mix(albedo, vec3(0.92), sw.y * (0.5 + 0.5 * n2));
+  // the swash film itself: glassy from the first mm, and tinted like the shallows as it
+  // thickens towards the waterline, so the sheet grades into the sea with no edge
+  float film = smoothstep(0.0, 0.004, sw.x) * step(0.0, hgt);
+  albedo *= mix(vec3(1.0), vec3(0.62, 0.82, 0.86), smoothstep(0.0, 0.06, sw.x) * film);
+  // bubbles: lace on the running-up edge, broken remnants carried down in the backwash
+  if (sw.y > 0.0) {
+    float lace = smoothstep(0.35, 0.65, tn(vWPos.xz * 3.1 + uTime * 0.15) * 0.6 + tn(vWPos.xz * 7.3) * 0.4);
+    albedo = mix(albedo, vec3(0.9, 0.92, 0.92), sw.y * lace);
+  }
   diffuseColor.rgb = albedo;
 `;
 
@@ -94,6 +113,19 @@ const RIPPLES = /* glsl */`
     vec3 nW = normalize(vWNrm - vec3(g.x, 0.0, g.y) * sandMask);
     normal = normalize((viewMatrix * vec4(nW, 0.0)).xyz);
     }
+  }
+#else
+  {
+    // crags and grain: a bump from the 3D noise through screen derivatives (no texture),
+    // the fine octave faded out before it aliases
+    float px = length(fwidth(vWPos));
+    float bh = tn3(vWPos * 1.6) * 0.6 + r2 * 0.25 + tn3(vWPos * 9.0) * 0.15 * (1.0 - smoothstep(0.03, 0.12, px));
+    vec3 dpx = dFdx(vWPos), dpy = dFdy(vWPos);
+    vec3 R1 = cross(dpy, vWNrm), R2 = cross(vWNrm, dpx);
+    float det = dot(dpx, R1);
+    vec3 grad = sign(det) * (dFdx(bh) * R1 + dFdy(bh) * R2);
+    vec3 nW = normalize(abs(det) * vWNrm - grad * 0.3);
+    normal = normalize((viewMatrix * vec4(nW, 0.0)).xyz);
   }
 #endif
 `;
@@ -145,7 +177,10 @@ const CAUSTICS = /* glsl */`
     vec2 entry = vWPos.xz + rsun.xz / rsun.y * wdepth;   // where this light entered the surface
     vec2 fwc = fwidth(entry);
     float c = waveCaustic(entry, wdepth, log2(max(max(fwc.x, fwc.y) * CAUSTIC_TEXELS_PER_M, 1.0)));
-    reflectedLight.directDiffuse *= max(mix(1.0, c, uCausticStrength), 0.0);
+    // a little more contrast in the first metre or two, where the net is sharpest; faded
+    // in over the top few cm so the waterline doesn't get a hard caustic seam
+    float cs = uCausticStrength * mix(1.35, 1.0, smoothstep(1.5, 3.0, wdepth)) * smoothstep(0.0, 0.3, wdepth);
+    reflectedLight.directDiffuse *= max(mix(1.0, c, cs), 0.0);
   }
 `;
 
@@ -193,17 +228,37 @@ function rockGeometry() {
   g.deleteAttribute('uv');
   g = mergeVertices(g);
   const p = g.attributes.position, v = new THREE.Vector3();
+  const ao = new Float32Array(p.count * 3);
   for (let i = 0; i < p.count; i++) {
     v.fromBufferAttribute(p, i);
     const n = fbm(v.x * 1.4 + 3, v.z * 1.4 + v.y * 0.7, 5, 21);
     const facet = Math.abs(fbm(v.x * 3.1, v.y * 3.1 + v.z, 3, 5));
-    v.multiplyScalar(1 + 0.38 * n - 0.12 * facet);
+    // ridged cracks cut into the surface
+    const crack = Math.abs(fbm(v.x * 5.7 + v.z * 1.9, v.y * 5.7 - v.z * 1.3, 2, 9));
+    const d = 1 + 0.38 * n - 0.12 * facet - 0.06 * Math.max(0.12 - crack, 0) / 0.12;
+    v.multiplyScalar(d);
+    // a hint of bedding: the height steps a little, like layered rock
+    v.y -= 0.7 * Math.sin(v.y * 8 * Math.PI) / (8 * Math.PI);
     if (v.y < -0.2) v.y = -0.2 + (v.y + 0.2) * 0.4;   // flattish base
     p.setXYZ(i, v.x, v.y, v.z);
+    // cavity occlusion baked into the vertex colour: hollows and cracks darker
+    const c = Math.min(Math.max(0.78 + 0.9 * (d - 1), 0.42), 1) * (0.65 + 0.35 * Math.min(crack / 0.12, 1));
+    ao[i * 3] = ao[i * 3 + 1] = ao[i * 3 + 2] = c;
   }
+  g.setAttribute('color', new THREE.BufferAttribute(ao, 3));
   g.computeVertexNormals();
   return g;
 }
+
+// one big rock out in the surf on the swell-exposed coast (the default swell comes from
+// bearing -15 deg), in ~2.5 m of water so the swash wraps round it; the 'Surf rock'
+// camera looks at it
+export const heroRock = (() => {
+  const a = THREE.MathUtils.degToRad(-15);
+  let r = 100;
+  while (r < 900 && islandHeight(Math.cos(a) * r, Math.sin(a) * r) > -2.5) r += 1;
+  return { x: Math.cos(a) * r, z: Math.sin(a) * r };
+})();
 
 function placeRocks(count, rand) {
   const out = [];
@@ -232,7 +287,7 @@ export function createTerrain({ sky, caustics, floatShadow, water, absorption, r
   const uniforms = {
     ...floatShadow,
     // shore maps + wave settings for the swash (same objects as the water's)
-    ...Object.fromEntries(['uShore', 'uTravel', 'uShoreExtent', 'uTime', 'uShoreWave', 'uSwellDir'].map((k) => [k, water[k]])),
+    ...Object.fromEntries(['uShore', 'uTravel', 'uSurf', 'uShoreExtent', 'uTime', 'uShoreWave', 'uSwellDir'].map((k) => [k, water[k]])),
     ...caustics,
     uSkyCube: { value: sky.cube },
     uAbsorption: { value: absorption },
@@ -251,13 +306,15 @@ export function createTerrain({ sky, caustics, floatShadow, water, absorption, r
   let seed = 7;
   const rand = () => ((seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296);
   const spots = placeRocks(90, rand);
-  const rockMat = new THREE.MeshStandardMaterial({ roughness: 0.85, metalness: 0, envMapIntensity: 0.9 });
+  spots.push({ ...heroRock, y: islandHeight(heroRock.x, heroRock.z) - 1.6, s: 0, hero: true });
+  const rockMat = new THREE.MeshStandardMaterial({ roughness: 0.85, metalness: 0, envMapIntensity: 0.9, vertexColors: true });
   patch(rockMat, uniforms, 'rock');
   const rocks = new THREE.InstancedMesh(rockGeometry(), rockMat, spots.length);
   const m = new THREE.Matrix4(), qt = new THREE.Quaternion(), e = new THREE.Euler(), sc = new THREE.Vector3();
   spots.forEach((s, i) => {
     e.set(rand() * 0.6, rand() * Math.PI * 2, rand() * 0.6);
-    sc.set(s.s * (0.8 + rand() * 0.6), s.s * (0.5 + rand() * 0.5), s.s * (0.8 + rand() * 0.6));
+    if (s.hero) sc.set(9, 6, 7.5);
+    else sc.set(s.s * (0.8 + rand() * 0.6), s.s * (0.5 + rand() * 0.5), s.s * (0.8 + rand() * 0.6));
     m.compose(new THREE.Vector3(s.x, s.y, s.z), qt.setFromEuler(e), sc);
     rocks.setMatrixAt(i, m);
   });

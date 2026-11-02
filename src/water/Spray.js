@@ -49,7 +49,9 @@ void main() {
 
   Shore s = shoreWaves(e, shoreSample(e));
   float a = s.wave0.x, k = s.wave0.y, w = s.wave0.z;
-  float strength = s.breaking0 * smoothstep(0.08, 0.35, a);
+  // only real breakers throw spray; the small spills over bars and in the lagoon would
+  // dot every crest with blobs
+  float strength = s.breaking0 * smoothstep(0.25, 0.55, a);
   if (strength <= 0.01) return;
   // seconds since the crest passed this emitter, staggered per particle
   float psi = mod(s.wave0.w + PI, 2.0 * PI) - PI;

@@ -57,6 +57,19 @@ vec4 shoreSample(vec2 xz) {
   if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(-60.0, 1e4, 0.0, 0.0);
   return textureLod(uShore, uv, 0.0);
 }
+// Shelter depth S (m): shallowest bar/reef the breakers crossed to get here. The water
+// fragment shader is at the 16 sampler limit, so it reads S from a vertex varying.
+#ifdef SURF_VARYING
+in float vSurf;
+float surfSample(vec2 xz) { return vSurf; }
+#else
+uniform sampler2D uSurf;
+float surfSample(vec2 xz) {
+  vec2 uv = xz / uShoreExtent + 0.5;
+  if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 6.0;
+  return textureLod(uSurf, uv, 0.0).r;
+}
+#endif
 vec4 travelSample(vec2 xz) {
   vec2 uv = xz / uShoreExtent + 0.5;
   if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
@@ -89,7 +102,9 @@ vec3 swash(vec2 xz, float hgt) {
   vec4 sh = shoreSample(xz);
   if (hgt < -0.3 || sh.y > 60.0 || uShoreWave.x <= 0.0) return vec3(0.0);
   vec2 dir = shoreDir(sh, travelSample(xz));
-  float R = 0.55 * uShoreWave.x * shoreExposure(dir) * shoreGroup(xz) * smoothstep(0.35, 0.8, length(sh.zw));
+  // run-up of what's left of the breakers: lagoon and lee beaches only lap
+  float A = min(uShoreWave.x * shoreExposure(dir) * shoreGroup(xz), 0.42 * surfSample(xz) + 0.02);
+  float R = 0.55 * A * smoothstep(0.35, 0.8, length(sh.zw));
   if (R < 0.02) return vec3(0.0);
   if (hgt > R) return vec3(0.0, 0.0, 0.5 * smoothstep(1.5 * R, R, hgt));   // reached by bigger sets
   float w = sqrt(9.81 * 6.2831853 / uShoreWave.y) * uShoreWave.z;
@@ -97,7 +112,9 @@ vec3 swash(vec2 xz, float hgt) {
   float s = fract((w * uTime + shoreNoisePhase(xz)) / 6.2831853);
   float eta = R * (s < 0.3 ? sin(s / 0.3 * 1.5708) : cos((s - 0.3) / 0.7 * 1.5708));
   float th = eta - hgt;
-  float edge = s < 0.35 ? smoothstep(-0.01, 0.0, th) * (1.0 - smoothstep(0.0, 0.05, th)) : 0.0;
+  // bubbly front while it runs up (a band behind the tip), thin remnants in the backwash
+  float edge = s < 0.35 ? smoothstep(-0.005, 0.005, th) * (1.0 - smoothstep(0.0, 0.06, th))
+                        : 0.35 * smoothstep(0.0, 0.01, th) * (1.0 - smoothstep(0.35, 0.8, s));
   // drying since the backwash uncovered this height
   float sPass = 0.3 + 0.7 * acos(clamp(hgt / R, 0.0, 1.0)) / 1.5708;
   float dry = (s > sPass ? s - sPass : s + 1.0 - sPass) * 6.2831853 / w;
@@ -169,7 +186,12 @@ Shore shoreWaves(vec2 xz, vec4 sh) {
   env *= shoreExposure(dir);
   float shoal = dot(tr.yz, tr.yz) > 0.25 ? tr.w : pow(clamp(max(depth, 0.6) / 14.0, 0.04, 1.0), -0.25);
   float cel = sqrt(9.81 * clamp(depth, 0.3, 14.0));
-  float amax = 0.42 * max(depth, 0.0) + 0.14;
+  // dissipation memory: a wave that already broke over a bar or reef (shelter depth S)
+  // reaches here at most 0.42 S high; once it runs into water much deeper than S it
+  // re-forms as unbroken swell instead of breaking again on every inner bar and flat
+  float S = surfSample(xz);
+  float amax = 0.42 * min(max(depth, 0.0), S) + 0.14 * smoothstep(0.5, 2.0, S) + 0.02;
+  float gate = smoothstep(1.4, 1.05, depth / max(S, 0.05));
   float noisePhase = shoreNoisePhase(xz);
   float group = shoreGroup(xz);
   float pinch = 0.85;   // total horizontal compression allowed (Jacobian stays > 0.15)
@@ -187,9 +209,11 @@ Shore shoreWaves(vec2 xz, vec4 sh) {
     // sections of each crest break early or late (peeling), new layout every wave
     float cycle = floor((ph + PI) / (2.0 * PI));
     float early = vnoise(xz * 0.03 + vec2(cycle * 7.3, cycle * 3.1 + float(i) * 31.0));
-    float breaking = smoothstep(0.12 + 0.14 * early, 0.3 + 0.2 * early, rel);
+    // too little height left to whiten anything (lagoon ripples, the lee of the rock)
+    float energy = smoothstep(0.03, 0.2, a);
+    float breaking = smoothstep(0.12 + 0.14 * early, 0.3 + 0.2 * early, rel) * gate * energy;
     // plunging only around the break point; the inner surf zone runs as a bore
-    float pitch = i == 0 ? 2.0 * uShoreWave.w * a * smoothstep(0.16, 0.28, rel) * (1.0 - smoothstep(0.4, 0.6, rel)) : 0.0;
+    float pitch = i == 0 ? 2.0 * uShoreWave.w * a * smoothstep(0.16, 0.28, rel) * (1.0 - smoothstep(0.4, 0.6, rel)) * gate : 0.0;
     // a heightfield can't overhang: the lean (up to 1.08 pitch k of compression just
     // ahead of the crest) and both trains' Gerstner pinch share one budget, so the
     // surface never folds over into a glassy fin
@@ -201,16 +225,24 @@ Shore shoreWaves(vec2 xz, vec4 sh) {
     o.disp.y += a * (2.0 * cp * c - 0.78);
     o.disp.xz += dir * ((qak / k) * s + pitch * c5 * c);
     o.slope += dir * (a * k * P * cp * s / max(1.0 - qak * cos(ph) + 3.0 * pitch * k * c5 * s, 0.2));
-    // whitewater: on the crest and trailing behind it once the wave is near breaking
+    // whitewater: on the crest and trailing behind it once the wave is near breaking. An
+    // established bore (rel > 0.4) also drags a long spilling sheet over its back face,
+    // which reaches past the pinched crest so the band isn't squeezed into a ribbon; the
+    // arcs wrapping round small bars stay thin.
     float psi = mod(ph + PI, 2.0 * PI) - PI;
-    float f = breaking * smoothstep(-0.45, 0.0, psi) * exp(-max(psi, 0.0) * 0.8);
+    // Small breakers spilling over bars and in the lagoon are short and shallow, so a band
+    // a radian wide is a thin ribbon there: they get a wider, fainter tail (a soft band
+    // the lace erodes, not a bright line drawn along every crest).
+    float big = smoothstep(0.2, 0.5, a);
+    float tail = max(exp(-max(psi, 0.0) * mix(0.45, 1.0, big)), 0.65 * smoothstep(0.3, 0.55, rel) * smoothstep(2.4, 0.3, psi));
+    float f = breaking * smoothstep(mix(-0.7, -0.35, big), 0.0, psi) * tail * mix(0.55, 1.0, big);
     o.foam += f;
     if (i == 0) {
       o.wave0 = vec4(a, k, w, ph);
       o.breaking0 = breaking;
       o.lip = breaking * c5 * smoothstep(0.6, -0.2, psi);
       // (the lace outlives single crests: no peeling, or it would pop between waves)
-      o.residual = smoothstep(0.18, 0.4, rel) * (0.3 + 0.45 * exp(-mod(ph, 2.0 * PI) * 0.4));
+      o.residual = smoothstep(0.18, 0.4, rel) * (0.3 + 0.45 * exp(-mod(ph, 2.0 * PI) * 0.4)) * gate * energy;
     }
   }
   return o;
@@ -246,6 +278,7 @@ uniform float uWind;
 out vec3 vWorld;
 out vec2 vXZ;
 out float vUnresolved;
+out float vSurf;
 
 void main() {
   vec2 local = position.xz;
@@ -263,11 +296,12 @@ void main() {
   vUnresolved = max(0.003 + 0.00512 * uWind - (m0.z + m0.w + m1.z + m1.w + m2.z + m2.w + m3.z + m3.w), 0.0);
 
   vXZ = xz;
+  vSurf = surfSample(xz);
   vWorld = vec3(xz.x + d.x, d.y, xz.y + d.z);
   gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0);
 }`;
 
-const FRAG = WATER_GLSL + FLOAT_SHADOW_GLSL + /* glsl */`
+const FRAG = '#define SURF_VARYING\n' + WATER_GLSL + FLOAT_SHADOW_GLSL + /* glsl */`
 precision highp sampler2DShadow;
 uniform vec2 uResolution;
 uniform vec2 uNearFar;
@@ -288,6 +322,7 @@ uniform vec3 uScatterColor;
 uniform vec3 uFoamTint;     // thin foam: the water colour showing through the bubbles
 uniform vec4 uSSS;          // peak strength, view strength, shadow strength, -
 uniform vec4 uFoam;         // bias, scale, shore band (m), brightness
+uniform vec4 uRock;         // surf rock: centre xz, waterline radius (m; 0 = none), unused
 uniform vec4 uOptics;       // base roughness, refraction strength, reflection distortion, fog density
 uniform vec3 uCamForward;
 uniform int uDebug;
@@ -343,6 +378,11 @@ void main() {
   vec4 s2 = texture(uSlope2, vXZ / uLength.z) * damp.z;
   vec4 s3 = texture(uSlope3, vXZ / uLength.w) * damp.z;
   s0.zw *= damp.x; s1.zw *= damp.y; s2.zw *= damp.z; s3.zw *= damp.z;   // second moments scale by damp^2
+  // wind slicks: surfactant patches damp the short waves (capillaries most), so the far
+  // field breaks into calm and rough streaks instead of a uniform speckle
+  float slick = smoothstep(0.3, 0.7, vnoise(vXZ * 0.006 + uTime * 0.01));
+  float sl2 = mix(0.75, 1.0, slick), sl3 = mix(0.4, 1.0, slick);
+  s2.xy *= sl2; s2.zw *= sl2 * sl2; s3.xy *= sl3; s3.zw *= sl3 * sl3;
   Shore shore = shoreWaves(vXZ, sh);
   vec2 fwXZ = fwidth(vXZ);
   vec3 imp = impactWaves(vWorld.xz, 2.0 / max(max(fwXZ.x, fwXZ.y), 1e-3));
@@ -358,7 +398,7 @@ void main() {
   // geometric specular AA (Kaplanyan): normal change across the pixel adds variance
   vec3 dndx = dFdx(Nrm), dndy = dFdy(Nrm);
   float geoVar = min(0.25 * (dot(dndx, dndx) + dot(dndy, dndy)), 0.18);
-  float alpha2 = uOptics.x * uOptics.x + vUnresolved * damp.z * damp.z + variance.x + variance.y + geoVar;
+  float alpha2 = uOptics.x * uOptics.x + vUnresolved * damp.z * damp.z * sl3 * sl3 + variance.x + variance.y + geoVar;
   float alpha = sqrt(alpha2);
 
   float NoV = max(dot(Nrm, V), 1e-4);
@@ -425,16 +465,45 @@ void main() {
   vec3 T = exp(-uAbsorption * thick);
 
   // shoreline contact foam where the water gets thin (in the shallows only: around
-  // floating props it would be a white frill)
-  float contact = (1.0 - smoothstep(0.0, uFoam.z, thick * viewCos)) * smoothstep(6.0, 2.0, depthBelow);
-  foam = max(foam, contact * 0.9);
+  // floating props it would be a white frill). Vertical thickness, so it doesn't change
+  // with camera pitch; capped below solid cover so it stays lace, and mostly where bores
+  // arrive (a lee shore or sandbar without surf gets almost none, not an outline).
   float shoreFoam = clamp(shore.foam, 0.0, 1.0);
+  float vth = thick * V.y;
+  // rocks (and props) the bed height map doesn't know about: water much thinner than the
+  // column over the bed (measured from the displaced surface). Swash churns a wider ring
+  // round them, which breathes as the waves rise and fall against them
+  float obst = smoothstep(0.5, 1.5, depthBelow + vWorld.y - vth);
+  float act = clamp(shore.residual * 1.5 + shoreFoam + 0.6 * obst, 0.0, 1.0);
+  float contact = smoothstep(mix(uFoam.z, 1.0, obst), 0.0, vth) * smoothstep(6.0, 2.0, depthBelow) * mix(0.0, 0.5, act);
+  // broken into drifting patches so it never traces the waterline as a continuous rim
+  contact *= smoothstep(0.3, 0.6, vnoise(vXZ * 0.7 + shore.dir * uTime * 0.4) * 0.65 + vnoise(vXZ * 2.3) * 0.35);
+  foam = max(foam, contact);
+  // the surf rock: each crest slams into it and leaves a churned skirt that fades until
+  // the next one and trails off into the lee (the depth-buffer contact above only reaches
+  // ~1 m out from a steep face). Phase of the main train, so it pulses with the sets.
+  vec2 rd = vWorld.xz - uRock.xy;
+  float rl = length(rd);
+  if (rl < uRock.z * 3.0 && uShoreWave.x > 0.0) {
+    float lee = max(dot(rd, shore.dir) / max(rl, 1e-3), 0.0);
+    float since = mod(shore.wave0.w, 2.0 * PI);            // radians since the crest passed
+    float hit = exp(-since * 0.7);
+    float reach = uRock.z * (1.15 + (0.3 + 0.9 * lee) * (0.3 + 0.7 * hit));
+    float ring = smoothstep(reach, uRock.z * 0.95, rl);
+    // churned patches streaming off into the lee, never a solid ring: noise thresholded
+    // by how fresh the hit is, so a slam is a dense burst that tears into lace as it ages
+    float n = vnoise(vXZ * 0.55 - shore.dir * uTime * 0.9) * 0.6 + vnoise(vXZ * 1.9 + uTime * 0.35) * 0.4;
+    float skirt = ring * smoothstep(0.62 - 0.3 * hit * ring, 0.85 - 0.3 * hit * ring, n);
+    foam = max(foam, skirt * mix(0.35, 0.75, hit) * smoothstep(0.0, 0.3, uShoreWave.x));
+  }
 
   // --- lighting ------------------------------------------------------------------
   vec3 ambient = skyLod(vec3(0.0, 1.0, 0.0), uSkyMaxLod);
   vec3 sun = uSunColor * shadow;
   // in-scatter of the water column (sun + sky), then Atlas-style SSS on crests
   vec3 inscatter = uScatterColor * (ambient + uSunColor * (0.3 + 0.7 * shadow) * max(uSunDir.y, 0.0));
+  // over shallow bright sand the light scattered back up has crossed little water: turquoise
+  inscatter *= 1.0 + 1.5 * exp(-0.3 * max(depthBelow, 0.0));
   float h = max(vWorld.y, 0.0);
   float k1 = uSSS.x * h * pow(clamp(dot(uSunDir, -V), 0.0, 1.0), 4.0) * pow(0.5 - 0.5 * NoL, 3.0);
   float k2 = uSSS.y * pow(NoV, 2.0);
@@ -443,6 +512,17 @@ void main() {
   // strongest looking into the sun
   sss += shore.lip * sun * exp(-uAbsorption * 2.0) * 0.06 * (0.3 + 2.5 * pow(clamp(dot(uSunDir, -V), 0.0, 1.0), 3.0));
   vec3 body = refracted * T + (inscatter + sss) * (1.0 - T);
+  // surf-zone turbidity: stirred sand and bubbles cloud the water under and behind the
+  // bores (milky, the bed and its caustics fade there); the water outside stays clear
+  float turb = clamp(shore.residual * 1.6 + shoreFoam * 0.8, 0.0, 1.0) * smoothstep(5.0, 0.5, depthBelow);
+  if (turb > 0.0) {
+    turb *= 0.6 + 0.4 * vnoise(vXZ * 0.08 - shore.dir * uTime * 0.3);
+    float ext = 1.6 * turb;
+    vec3 Tt = T * exp(-ext * thick);
+    vec3 milk = uFoamTint * (ambient + uSunColor * (0.3 + 0.7 * shadow) * max(uSunDir.y, 0.0)) * 0.35;
+    float wm = min(ext / (ext + dot(uAbsorption, vec3(0.333))), 0.5);
+    body = refracted * Tt + mix(inscatter + sss, milk, wm) * (1.0 - Tt);
+  }
 
   // Fresnel with roughness-aware F90 (Lagarde) so the rough far field doesn't go white
   const float F0 = 0.02;
@@ -496,6 +576,10 @@ void main() {
   }
 
   vec3 col = mix(body, refl, F) + spec;
+  // vanishing film at the waterline: no reflection / specular seam where the mesh cuts the sand
+  // (a few cm wide and over the swash band, so the edge melts into the moving film on
+  // the sand instead of drawing a glassy lip line along the static mesh waterline)
+  col = mix(refracted, col, smoothstep(0.0, 0.12 + dist * 5e-4, vth));
 
   // --- foam surface: eroded by age via the pattern threshold, kills specular ----------
   // erosion: dense foam is nearly solid, ageing foam thins out to the lace network
@@ -521,7 +605,9 @@ void main() {
     vec4 b1 = texture(uFoamTex, (vWorld.xz - vel * (f1 * FLOW_T)) * 0.15 + 0.43);
     float sh_ = mix(b0.g, b1.g, wb);
     float sPattern = mix(b0.r, b1.r, wb) * 0.3 + sh_ * 0.45 + texture(uFoamTex, vWorld.xz * 0.023 + 0.5).r * 0.25;
-    float sCover = smoothstep(1.0 - shoreFoam * 1.1, 1.2 - shoreFoam * 1.1, sPattern) * sqrt(shoreFoam);
+    // lace over a translucent veil: spilling whitewater is a bubbly sheet, not a ribbon
+    float sCover = smoothstep(1.0 - shoreFoam * 1.1, 1.45 - shoreFoam * 1.1, sPattern) * sqrt(shoreFoam);
+    sCover = max(sCover, 0.45 * smoothstep(0.1, 0.7, shoreFoam) * (0.6 + 0.4 * sPattern));
     if (sCover >= cover) {
       pat = sPattern; fh = sh_; dens = shoreFoam;
       fg = mix(b0.ba, b1.ba, wb) * (64.0 * 0.15) - 32.0 * 0.15;
@@ -547,7 +633,7 @@ void main() {
     float fl = dot(fN, uSunDir);
     float ao = mix(0.45, 1.0, smoothstep(0.15, 0.75, fh));
     float solid = smoothstep(0.2, 0.9, dens * (0.55 + 0.7 * fh));
-    vec3 foamAlbedo = mix(uFoamTint, vec3(0.95), max(solid, smoothstep(0.3, 0.9, pat) * 0.6));
+    vec3 foamAlbedo = mix(uFoamTint, vec3(0.93, 0.92, 0.88), max(solid, smoothstep(0.3, 0.9, pat) * 0.6));
     vec3 lit = sun * (0.15 + 0.85 * clamp(fl * 0.8 + 0.2, 0.0, 1.0)) * mix(ao, 1.0, 0.4) + ambient * 1.1 * ao;
     // sun behind the crest shines through the thin foam on top
     lit += sun * pow(clamp(dot(uSunDir, -V), 0.0, 1.0), 4.0) * 0.4 * (1.0 - solid);
@@ -580,7 +666,7 @@ export class OceanSurface {
       uWind: { value: 0 },
       uImpact: { value: Array.from({ length: 8 }, () => new THREE.Vector4()) },
       uImpactSize: { value: new Array(8).fill(1) },
-      uShore: { value: shore.texture }, uTravel: { value: shore.travel }, uShoreExtent: { value: shore.extent },
+      uShore: { value: shore.texture }, uTravel: { value: shore.travel }, uSurf: { value: shore.surf }, uShoreExtent: { value: shore.extent },
       uTime: { value: 0 },
       uShoreWave: { value: new THREE.Vector4(0.55, 30, 1.0, 1.0) },
       uWaveDamp: { value: new THREE.Vector2(26, 0.55) },
@@ -602,11 +688,12 @@ export class OceanSurface {
       ...floatShadow,
       uSunDir: { value: sky.sunDir },
       uSunColor: { value: sky.sunColor },
-      uAbsorption: { value: new THREE.Vector3(0.42, 0.075, 0.048) },
+      uAbsorption: { value: new THREE.Vector3(0.40, 0.062, 0.032) },
       uScatterColor: { value: new THREE.Color(0.0, 0.05, 0.08) },
       uFoamTint: { value: new THREE.Color(0.62, 0.78, 0.82) },
       uSSS: { value: new THREE.Vector4(1.6, 0.06, 0.05, 0) },
-      uFoam: { value: new THREE.Vector4(0.05, 1.3, 0.35, 0.85) },
+      uFoam: { value: new THREE.Vector4(0.05, 1.3, 0.2, 0.72) },
+      uRock: { value: new THREE.Vector4() },
       uOptics: { value: new THREE.Vector4(0.02, 0.06, 0.04, 1 / 18000) },
       uCamForward: { value: new THREE.Vector3() },
       uDebug: { value: 0 },
