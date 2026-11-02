@@ -512,16 +512,16 @@ void main() {
   // strongest looking into the sun
   sss += shore.lip * sun * exp(-uAbsorption * 2.0) * 0.06 * (0.3 + 2.5 * pow(clamp(dot(uSunDir, -V), 0.0, 1.0), 3.0));
   vec3 body = refracted * T + (inscatter + sss) * (1.0 - T);
-  // surf-zone turbidity: stirred sand and bubbles cloud the water under and behind the
-  // bores (milky, the bed and its caustics fade there); the water outside stays clear
-  float turb = clamp(shore.residual * 1.6 + shoreFoam * 0.8, 0.0, 1.0) * smoothstep(5.0, 0.5, depthBelow);
+  // surf-zone turbidity: sand stirred up under and behind the bores clouds the water a
+  // little (the bed and its caustics soften, the colour goes sandy-green), never white:
+  // bubbles are the foam layer's job. The thin wash over the beach settles clear again.
+  float turb = clamp(shore.residual * 0.8 + shoreFoam * 0.6, 0.0, 1.0) * smoothstep(5.0, 1.0, depthBelow) * smoothstep(0.1, 0.8, vth);
   if (turb > 0.0) {
     turb *= 0.6 + 0.4 * vnoise(vXZ * 0.08 - shore.dir * uTime * 0.3);
-    float ext = 1.6 * turb;
+    float ext = 0.7 * turb;
     vec3 Tt = T * exp(-ext * thick);
-    vec3 milk = uFoamTint * (ambient + uSunColor * (0.3 + 0.7 * shadow) * max(uSunDir.y, 0.0)) * 0.35;
-    float wm = min(ext / (ext + dot(uAbsorption, vec3(0.333))), 0.5);
-    body = refracted * Tt + mix(inscatter + sss, milk, wm) * (1.0 - Tt);
+    float wm = min(ext / (ext + dot(uAbsorption, vec3(0.333))), 0.4);
+    body = refracted * Tt + mix(inscatter + sss, inscatter * vec3(1.2, 1.1, 0.75), wm) * (1.0 - Tt);
   }
 
   // Fresnel with roughness-aware F90 (Lagarde) so the rough far field doesn't go white
@@ -605,9 +605,11 @@ void main() {
     vec4 b1 = texture(uFoamTex, (vWorld.xz - vel * (f1 * FLOW_T)) * 0.15 + 0.43);
     float sh_ = mix(b0.g, b1.g, wb);
     float sPattern = mix(b0.r, b1.r, wb) * 0.3 + sh_ * 0.45 + texture(uFoamTex, vWorld.xz * 0.023 + 0.5).r * 0.25;
-    // lace over a translucent veil: spilling whitewater is a bubbly sheet, not a ribbon
+    // lace over a thin, patchy veil on the fresh bore only (an even translucent sheet over
+    // the whole inner surf zone reads as ice); in the thin wash it all breaks up into lace
     float sCover = smoothstep(1.0 - shoreFoam * 1.1, 1.45 - shoreFoam * 1.1, sPattern) * sqrt(shoreFoam);
-    sCover = max(sCover, 0.45 * smoothstep(0.1, 0.7, shoreFoam) * (0.6 + 0.4 * sPattern));
+    sCover = max(sCover, 0.3 * smoothstep(0.45, 0.9, shoreFoam) * smoothstep(0.35, 0.7, sPattern));
+    sCover *= mix(0.55, 1.0, smoothstep(0.05, 0.4, vth));
     if (sCover >= cover) {
       pat = sPattern; fh = sh_; dens = shoreFoam;
       fg = mix(b0.ba, b1.ba, wb) * (64.0 * 0.15) - 32.0 * 0.15;
