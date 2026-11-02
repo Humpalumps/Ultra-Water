@@ -30,6 +30,9 @@ renderer.autoClear = false;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.shadowMap.autoUpdate = false;
+// three caps texture units at the per-stage limit (16), but the water's vertex + fragment
+// samplers together are 17 (16 in the fragment stage); units only need the combined limit
+renderer.capabilities.maxTextures = renderer.getContext().getParameter(WebGL2RenderingContext.MAX_COMBINED_TEXTURE_IMAGE_UNITS);
 document.body.appendChild(renderer.domElement);
 
 // one build: phones and tablets (a finger is the main pointer) start on a lighter profile,

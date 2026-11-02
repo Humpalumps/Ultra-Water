@@ -7,7 +7,7 @@ npm install
 npm run dev
 ```
 
-Open the printed localhost URL. Orbit with the mouse (or a finger: phones get their own profile, see [Phones and tablets](#phones-and-tablets)). Pick shots from the `camera` dropdown (they also set the sun). The performance panel (top left) shows the GPU, render size, fps, ms per frame and a 20 s graph. Its `Uncap FPS` button switches the loop off the display's refresh: frames then render back-to-back, with at most three in flight on the GPU, so the counter shows what the machine can do while the scene keeps running live. The screen still updates at its own rate. `Cap to display` switches back. `Run benchmark` (also `benchmark (uncapped)` in the settings) renders 300 frames back-to-back with the render loop paused and times them to GPU completion with a fence. The screen freezes for about a second while it runs, so it only runs when asked.
+Open the printed localhost URL. Orbit with the mouse (or a finger: phones get their own profile, see [Phones and tablets](#phones-and-tablets)). It opens on the `Lagoon` shot. Pick others from the `camera` dropdown (they also set the sun). The performance panel (top left) shows the GPU, render size, fps, ms per frame and a 20 s graph. Its `Uncap FPS` button switches the loop off the display's refresh: frames then render back-to-back, with at most three in flight on the GPU, so the counter shows what the machine can do while the scene keeps running live. The screen still updates at its own rate. `Cap to display` switches back. `Run benchmark` (also `benchmark (uncapped)` in the settings) renders 300 frames back-to-back with the render loop paused and times them to GPU completion with a fence. The screen freezes for about a second while it runs, so it only runs when asked.
 
 ## Performance
 
@@ -16,16 +16,15 @@ Measured with the in-page benchmark on an RTX 3060 (Chrome, ANGLE/D3D11), 4× MS
 | Shot | ms / frame | fps (uncapped) |
 |---|---|---|
 | Open ocean | 3.30 | ~303 |
-| Breakers | 4.17 | ~240 |
-| Golden hour | 4.20 | ~238 |
-| Lagoon | 4.48 | ~223 |
-| Flotsam (10 floating props) | 4.62 | ~217 |
-| Underwater | 4.71 | ~212 |
-| Aerial | 4.80 | ~208 |
+| Golden hour | 4.35 | ~230 |
+| Aerial | 4.90 | ~204 |
+| Underwater | 4.93 | ~203 |
+| Breakers | 4.95 | ~202 |
+| Lagoon | 5.32 | ~188 |
+| Flotsam (10 floating props) | 5.79 | ~173 |
+| Surf rock | 5.92 | ~169 |
 
-Per pass in Breakers: water 1.66 ms, opaque (island, rocks, props) 1.21, post 0.37, caustics 0.24, FFT sim ~0.45 (independent of resolution). Caustics cost more under a low sun (about 0.36 ms at 3.5° elevation), because the refracted rays fold more.
-
-The crest-foam upgrade landed after this run. It adds three texture taps and some ALU per foam pixel only. It hasn't been re-measured cleanly yet, because another application was loading the GPU at the time.
+Per pass in Breakers: water 1.90 ms, opaque (island, rocks, props) 1.63, post 0.38, caustics 0.22, FFT sim ~0.45 (independent of resolution). Caustics cost more under a low sun (about 0.37 ms in Golden hour), because the refracted rays fold more. Lagoon, Flotsam and Surf rock look down into the shallows, where nearly every water pixel runs the shore waves, foam and swash, so their water pass is 2.6–3.0 ms.
 
 Earlier versions of this README quoted numbers 2–4× lower. Those came from a benchmark that synced with `readPixels`/`finish`, which ANGLE doesn't wait on. The fence-based benchmark is the one to trust. The HUD's GPU timer-query numbers read high while vsync-capped, because the GPU downclocks between frames.
 
@@ -35,7 +34,7 @@ The same build spots phones and tablets (a finger as the main pointer, `matchMed
 
 The mobile profile is resolution 0.6 (of the device pixel ratio, capped at 2), 2× MSAA, reflections at 0.35 scale and no bloom. On a phone the cost is mostly the number of render passes Chrome's GPU process has to translate, not pixels, so dropping bloom's 12 passes did more than lowering resolution. Auto resolution (`auto resolution` in the Quality folder) steps down by 0.05, to a floor of 0.5, when more than 4% of frames miss vsync over 2 s. It climbs back to 0.6 once frames are clean, and locks to a steady 30 fps if the floor still misses more than a quarter.
 
-Measured on a OnePlus Nord 4 (Snapdragon 7+ Gen 3, Adreno 732, Chrome 156, which runs pages at 60 Hz on it), portrait, 424×782:
+Measured before the shore update (surf rock, clear shallows, wet sand), on a OnePlus Nord 4 (Snapdragon 7+ Gen 3, Adreno 732, Chrome 156, which runs pages at 60 Hz on it), portrait, 424×782:
 
 | Shot | live fps | missed frames | fps (uncapped) |
 |---|---|---|---|
@@ -73,13 +72,22 @@ With the desktop settings (708×1304, 4× MSAA, bloom) the same phone ran 41–5
   - Plunging lean near the break point, with translucent lips. The lean and both wave trains' Gerstner pinch share one budget, so the heightfield never folds over.
   - Peeling: each crest breaks early in some sections and late in others, with a new layout every wave.
   - Where fronts from two coast stretches meet (shocks), the waves fade out instead of folding into sheets.
+  - A rock in the surf is baked into the travel-time field as a dome, so fronts wrap round it, break on its face and leave a sheltered lee. The stored bed ignores the dome, so the seabed itself is unchanged.
+  - Each train is band-limited to the grid's sample spacing. The camera-centred grid slides as the view moves, so a crest only a cell or two long would be resampled differently every frame and the waterline would warp and flash.
 - Foam:
   - The baked foam texture holds a lace pattern plus a "cauliflower" billow height and its gradient.
   - Crest whitewater is textured on the displaced surface with a world-space flow map that rides shoreward at the phase speed. Its two phases are crossfaded, which also makes it churn.
   - Coverage erodes with age, from solid whitewater to holes to lace. The billows bump the normal and shade their creases. Thin foam is tinted by the water under it and glows when backlit. Bubble tops get a little sheen.
   - Lace stays behind in the surf zone and drifts shoreward.
-- Beach swash (shared GLSL with the terrain): each bore runs up the sand and drains back as a thin film with a foam edge, leaving a wet line that dries over a few seconds.
-- Impact rings: a floater hitting the water starts Cauchy–Poisson ripple rings, plus a splash crown (`Spray.js`).
+  - Small breakers spilling over bars get a wide, faint foam tail instead of a bright line along every crest. Only real breakers throw spray.
+  - The rock gets churned lace streaming into its lee, scaled by how fresh the last hit was. Waterline foam is broken into drifting patches, so it never traces the shore as a white rim, and fades on the vanishing film at the edge and far off, where it would only sparkle.
+- Clear shallows: sand stirred up under and behind the bores absorbs and shifts the colour sandy-green, rather than milking the water white. Fresh bores carry a thin, patchy veil that breaks into lace in the wash.
+- Beach swash (shared GLSL with the terrain): each bore runs up the sand and drains back as a thin film with a foam edge, leaving a wet line that dries over a few seconds. The film is a faint sheen rather than a sky mirror, its front is antialiased with distance, and wet sand darkens roughly as albedo squared, so the waterline dissolves into warm wet sand.
+- The surface never dips below the bed + 4 cm where the bed is under sea level (the clearance grows with distance, as depth precision falls off). Coarse far troughs used to show dry, caustic-lit sand through bars and flats.
+- Spray (`Spray.js`), drawn as droplet clouds rather than smooth puffs:
+  - Crests slamming into the rock, and the swash front hitting it on the beach, throw spray up its face, so the water stops against the rock instead of sliding through.
+  - A floater hitting the water starts Cauchy–Poisson ripple rings, plus a splash crown.
+  - Droplets are drawn at least 1.5 px across and faded by their coverage, so distant ones don't flicker as they cross pixel centres.
 - FFT swell fades out in the shallows and the shore waves take over.
 
 **Caustics** (`src/water/Caustics.js`)
@@ -129,7 +137,7 @@ With the desktop settings (708×1304, 4× MSAA, bloom) the same phone ran 41–5
 **Scene**
 - Hillaire 2020 atmosphere (`atmosphere.js`): transmittance, multiple-scattering and sky-view LUTs with ozone. Clouds are on top. It is baked into a mipmapped 1024 HDR cube when the sun moves, and serves as the background, reflection, fog colour and IBL.
 - Procedural island with:
-  - Biome shading and wet sand.
+  - Biome shading and wet sand, with a soft seabed/sand seam.
   - Swash film and wet line.
   - Wave-formed sand ripples whose crests meander, fork and fade in patches.
   - Sunlight that arrives refracted under water, dimmed by Fresnel transmission and absorbed along its path. Both shadow maps are read at the surface entry point, so up-sun sand bars don't shadow the whole bed.
@@ -138,7 +146,7 @@ With the desktop settings (708×1304, 4× MSAA, bloom) the same phone ran 41–5
 
 The `Water` folder has a `colour preset` dropdown (clear, tropical, toxic green, purple, rust orange, murky brown). Each sets the absorption, in-scatter colour, thin-foam tint and underwater scattering together; `clarity` and `scatter` still adjust on top.
 
-Camera presets `Flotsam` and `Underwater` spawn a field of floating props. The `Floaters & underwater` folder has spawn, drop and clear buttons, plus drag, buoyancy, scattering, shaft and meniscus controls.
+Camera presets: `Golden hour`, `Breakers`, `Lagoon`, `Surf rock`, `Open ocean`, `Aerial`, `Flotsam` and `Underwater`. `Flotsam` and `Underwater` spawn a field of floating props. The `Floaters & underwater` folder has spawn, drop and clear buttons, plus drag, buoyancy, scattering, shaft and meniscus controls.
 
 ## Not in yet
 
