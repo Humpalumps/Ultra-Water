@@ -230,7 +230,7 @@ let fSun = null;
 // --- GUI -----------------------------------------------------------------------
 const gui = new GUI({ title: 'Gelatin Water' });
 if (mobile) gui.close();   // on phones the open panel covers most of the screen
-const ui = { view: 'Golden hour', benchmark: () => benchButton.click(), exposure: 1 };
+const ui = { view: 'Lagoon', benchmark: () => benchButton.click(), exposure: 1 };
 gui.add(ui, 'view', Object.keys(views)).name('camera').onChange((v) => views[v]());
 gui.add(ui, 'benchmark').name('benchmark (uncapped)');
 
